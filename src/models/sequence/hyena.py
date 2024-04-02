@@ -9,7 +9,7 @@ from functools import partial
 from einops import rearrange, repeat
 
 try:
-    from src.ops.fftconv import fftconv_ref, fftconv_func 
+    from src.ops.fftconv import fftconv_ref, fftconv_func, fftconv_h3_ref
 except ImportError:
     fftconv_func = None
 
@@ -372,3 +372,173 @@ class HyenaOperator(nn.Module):
     @property
     def d_output(self):
         return self.d_model
+    
+class MultiHeadHyenaOperator(HyenaOperator):
+    def __init__(
+        self,
+        d_model,
+        l_max,
+        filter_order=64,
+        num_heads=1,
+        inner_factor=1,
+        num_blocks=1,
+        fused_bias_fc=True,
+        dropout=0.0,
+        filter_dropout=0.0,
+        filter_cls="hyena-filter",
+        post_order_ffn=False,
+        layer_idx=None,
+        jit_filter=False,
+        short_filter_order=3,
+        activation="id",
+        return_state=False,
+        use_monarch=False,
+        skip_short_filter=False, # for testing
+        skip_long_filters=False, # for testing
+        skip_filter=False, # for testing
+        **filter_args,
+    ):
+        r"""
+        Hyena operator described in the paper https://arxiv.org/pdf/2302.10866.pdf
+
+        Args:
+            d_model (int): Dimension of the input and output embeddings (width of the layer)
+            l_max: (int): Maximum input sequence length. Defaults to None
+            order: (int): Depth of the Hyena recurrence. Defaults to 2
+            filter_order: (int): Width of the FFN parametrizing the implicit filter. Defaults to 64
+            num_heads: (int): Number of heads. Defaults to 1
+            inner_factor: (int): Width multiplier. Defaults to 1
+            num_blocks: (int): Number of blocks in sequence length. Defaults to 1
+            fused_bias_fc: (bool): Whether to use fused bias FC. Defaults to False
+            dropout: (float): Dropout probability. Defaults to 0.0
+            filter_dropout: (float): Dropout probability for the filter. Defaults to 0.0
+            post_order_ffn: (bool): Apply a dense layer between steps of the recurrence. Defaults to False
+            jit_filter: (bool): Whether JIT the implicit filter function. Defaults to False
+            short_filter_order: (int): Length of the explicit input convolutional filter. Defaults to 3
+            activation: (str): type of act between kernel output and FF (default identity)
+            return_state: (bool): whether to return a state
+        """
+        super().__init__(
+            d_model,
+            l_max,
+            2,
+            filter_order,
+            num_heads,
+            inner_factor,
+            num_blocks,
+            fused_bias_fc,
+            False,
+            dropout,
+            filter_dropout,
+            filter_cls,
+            post_order_ffn,
+            jit_filter,
+            short_filter_order,
+            activation,
+            return_state,
+            **filter_args,
+        )
+        filter_cls = instantiate(registry.layer, filter_cls, partial=True)
+        self.layer_idx = layer_idx
+        # this double assigns as there is another init call inside the super class
+        self.filter_fn = filter_cls(
+            self.head_dim,
+            order=self.filter_order,
+            seq_len=self.l_max,
+            channels=1,
+            dropout=self.filter_dropout,
+            **filter_args,
+        )
+        if self.jit_filter:
+            self.filter_fn = torch.jit.script(self.filter_fn, self.L)
+        self.use_monarch = use_monarch
+        self.skip_short_filter = skip_short_filter
+        self.skip_long_filters = skip_long_filters
+        self.skip_filter = skip_filter
+
+    def _update_kv_cache(self, u, inference_params):
+        assert self.layer_idx is not None
+        l = u.size(-2)
+        l_filter = min(l, self.l_max)
+        if self.layer_idx not in inference_params.key_value_memory_dict:
+            u = self.in_proj(u)
+            u = rearrange(u, "b l d -> b d l")
+            if l >= l_filter:
+                k = self.filter_fn.filter(l_filter, device=u.device)
+                # `c` is always 1 by default
+                k = rearrange(k, "c l v -> c v l", v=self.head_dim)[0].contiguous()
+            else:
+                k = None
+            inference_params.key_value_memory_dict[self.layer_idx] = (u, k)
+        else:
+            u = self.in_proj(u)
+            u = rearrange(u, "b 1 d -> b d 1")
+            u_, k = inference_params.key_value_memory_dict[self.layer_idx]
+            u = torch.cat((u_, u), dim=-1)
+            if k is not None:
+                k = self.filter_fn.filter(l_filter, device=u.device)
+                # `c` is always 1 by default
+                k = rearrange(k, "c l v -> c v l", v=self.head_dim)[0].contiguous()
+
+        return u, k
+
+    def forward(self, u, inference_params=None, *args, **kwargs):
+        l = u.size(-2)
+        l_filter = min(l, self.l_max)
+
+        if inference_params is not None:
+            # if inference_params is passed then we expect u to have just a single element
+            u, k = self._update_kv_cache(u, inference_params)
+        else:
+            u = self.in_proj(u)
+            u = rearrange(u, "b l d -> b d l")
+            k = self.filter_fn.filter(l_filter, device=u.device)
+            # `c` is always 1 by default
+            k = rearrange(k, "c l v -> c v l", v=self.head_dim)[0].contiguous()
+        
+        if not self.skip_short_filter:
+            uc = self.short_filter(u)[..., :l_filter]
+        
+            x1, x2, v = uc.split(self.d_model, dim=1)
+            x1 = x1.contiguous()
+            x2 = x2.contiguous()
+            v = v.contiguous()
+        else:
+            x1 = u
+            x2 = u
+            v = u
+
+        bias = self.filter_fn.bias
+        if self.skip_long_filters:
+            y = x1
+        elif self.use_monarch:
+            # filter_fn is a Monarch Conv
+            y = self.filter_fn(v, k, bias, x1=x1, x2=x2, head_dim=self.num_heads)
+        elif self.filter_fn.fused_fft_conv == True:
+            y = fftconv_func(
+                v,
+                k,
+                bias,
+                dropout_mask=None,
+                gelu=False,
+                output_hbl_layout=True,
+                v=x2,
+                head_dim=self.num_heads,
+                q=x1,
+            )
+        else:
+            y = fftconv_h3_ref(
+                v,
+                k,
+                bias,
+                v=x2,
+                head_dim=self.num_heads,
+                q=x1,
+            )
+
+        y = rearrange(y, "b d l -> b l d")
+        y = self.out_proj(y)
+        if self.return_state:
+            return y, None
+        else:
+            return y
