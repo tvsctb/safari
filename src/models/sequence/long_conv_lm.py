@@ -66,39 +66,93 @@ def create_mixer_cls(layer=None, process_group=None,
     return mixer_cls
 
 
-def create_mlp_cls(d_model, d_inner=None, process_group=None, fused_mlp=False,
-                   sequence_parallel=True, device=None, dtype=None):
+def create_mlp_cls(
+        d_model,
+        d_inner=None,
+        process_group=None,
+        fused_mlp=False,
+        sequence_parallel=True,
+        identity_mlp=False,
+        mlp_layer=None,
+        device=None,
+        dtype=None
+):
     factory_kwargs = {'device': device, 'dtype': dtype}
     inner_dim = d_inner if d_inner is not None else 4 * d_model
     if process_group is not None:
         assert fused_mlp, 'Tensor Parallel is only implemented for FusedMLP'
-    if not fused_mlp:
-        mlp_cls = partial(Mlp, hidden_features=inner_dim,
-                          activation=partial(F.gelu, approximate='tanh'), **factory_kwargs)
-    else:
+    if not fused_mlp and not identity_mlp and mlp_layer is None:
+        mlp_cls = partial(
+            Mlp,
+            hidden_features=inner_dim,
+            activation=partial(F.gelu, approximate="tanh"),
+            **factory_kwargs,
+        )
+    elif fused_mlp and not identity_mlp and mlp_layer is None:
         mlp_cls = FusedMLP if process_group is None else ParallelFusedMLP
-        parallel_kwargs = ({'process_group': process_group, 'sequence_parallel': sequence_parallel}
-                            if process_group is not None else {})
-        mlp_cls = partial(mlp_cls, hidden_features=inner_dim, **parallel_kwargs, **factory_kwargs)
+        parallel_kwargs = (
+            {"process_group": process_group, "sequence_parallel": sequence_parallel}
+            if process_group is not None
+            else {}
+        )
+        mlp_cls = partial(
+            mlp_cls, hidden_features=inner_dim, **parallel_kwargs, **factory_kwargs
+        )
+    elif mlp_layer is None:
+        mlp_cls = nn.Identity
+    else:
+        mlp_cls = instantiate(
+            registry.layer,
+            mlp_layer,
+            partial=True,
+            hidden_features=inner_dim,
+            activation=partial(F.gelu, approximate="tanh"),
+            **factory_kwargs,
+            **parallel_kwargs,
+        )
     return mlp_cls
 
 
-def create_block(d_model, d_inner=None, process_group=None,
-                 layer=None, attn_layer_idx=None,
-                 attn_cfg=None, layer_norm_epsilon=1e-5,
-                 resid_dropout1=0.0, resid_dropout2=0.0, residual_in_fp32=False,
-                 fused_mlp=False, fused_dropout_add_ln=False, layer_idx=None,
-                 sequence_parallel=True,
-                 device=None, dtype=None):
+def create_block(
+    d_model,
+    d_inner=None,
+    process_group=None,
+    layer=None,
+    mlp_layer=None,
+    attn_layer_idx=None,
+    attn_cfg=None,
+    layer_norm_epsilon=1e-5,
+    resid_dropout1=0.0,
+    resid_dropout2=0.0,
+    residual_in_fp32=False,
+    fused_mlp=False,
+    identity_mlp=False,
+    fused_dropout_add_ln=False,
+    layer_idx=None,
+    sequence_parallel=True,
+    device=None,
+    dtype=None
+):
     factory_kwargs = {'device': device, 'dtype': dtype}
-    mixer_cls = create_mixer_cls(layer=layer, process_group=process_group,
-                                 attn_layer_idx=attn_layer_idx,
-                                 attn_cfg=attn_cfg, layer_idx=layer_idx,
-                                 sequence_parallel=sequence_parallel,
-                                 **factory_kwargs)
-    mlp_cls = create_mlp_cls(d_model, d_inner=d_inner, process_group=process_group,
-                             fused_mlp=fused_mlp, sequence_parallel=sequence_parallel,
-                             **factory_kwargs)
+    mixer_cls = create_mixer_cls(
+        layer=layer,
+        process_group=process_group,
+        attn_layer_idx=attn_layer_idx,
+        attn_cfg=attn_cfg,
+        layer_idx=layer_idx,
+        sequence_parallel=sequence_parallel,
+        **factory_kwargs,
+    )
+    mlp_cls = create_mlp_cls(
+        d_model,
+        d_inner=d_inner,
+        process_group=process_group,
+        fused_mlp=fused_mlp,
+        identity_mlp=identity_mlp,
+        sequence_parallel=sequence_parallel,
+        mlp_layer=mlp_layer,
+        **factory_kwargs,
+    )
     norm_cls = partial(nn.LayerNorm, eps=layer_norm_epsilon, **factory_kwargs)
     block = Block(d_model, mixer_cls, mlp_cls, norm_cls=norm_cls,
                   prenorm=True, resid_dropout1=resid_dropout1, resid_dropout2=resid_dropout2,
@@ -144,16 +198,33 @@ def _init_weights(module, n_layer, initializer_range=0.02, rescale_prenorm_resid
 
 class LMBackbone(nn.Module):
 
-    def __init__(self, d_model: int, n_layer: int, d_inner: int, vocab_size: int,
-                 process_group=None, layer=None,
-                 attn_layer_idx=None, attn_cfg=None, max_position_embeddings=0,
-                 resid_dropout: float = 0.0, embed_dropout: float = 0.1, dropout_cls=nn.Dropout,
-                 layer_norm_epsilon: float = 1e-5, initializer_cfg=None,
-                 fused_mlp=False, fused_dropout_add_ln=False, residual_in_fp32=False,
-                 sequence_parallel=True,
-                 device=None, dtype=None, 
-                 use_flashfftconv=False,
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        d_model: int,
+        n_layer: int,
+        d_inner: int,
+        vocab_size: int,
+        process_group=None,
+        layer=None,
+        attn_layer_idx=None,
+        attn_cfg=None,
+        max_position_embeddings=0,
+        resid_dropout: float = 0.0,
+        embed_dropout: float = 0.1,
+        dropout_cls=nn.Dropout,
+        layer_norm_epsilon: float = 1e-5,
+        initializer_cfg=None,
+        fused_mlp=False,
+        identity_mlp=False,
+        fused_dropout_add_ln=False,
+        residual_in_fp32=False,
+        sequence_parallel=True,
+        device=None,
+        dtype=None, 
+        use_flashfftconv=False,
+        mlp_layer=None,
+        **kwargs
+    ) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         self.process_group = process_group
@@ -191,8 +262,11 @@ class LMBackbone(nn.Module):
             attn_cfg=attn_cfg, layer_norm_epsilon=layer_norm_epsilon,
             resid_dropout1=embed_dropout if i == 0 else resid_dropout,
             resid_dropout2=resid_dropout, residual_in_fp32=residual_in_fp32,
-            fused_mlp=fused_mlp, fused_dropout_add_ln=fused_dropout_add_ln, layer_idx=i,
+            fused_mlp=fused_mlp,
+            identity_mlp=identity_mlp,
+            fused_dropout_add_ln=fused_dropout_add_ln, layer_idx=i,
             sequence_parallel=self.sequence_parallel,
+            mlp_layer=mlp_layer,
             **factory_kwargs,
         ) for i in range(n_layer)])
 

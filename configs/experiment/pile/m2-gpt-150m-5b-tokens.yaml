@@ -1,0 +1,41 @@
+# @package _global_
+defaults:
+  - /experiment/pile/base.yaml
+
+trainer:
+  max_steps: 10000
+
+scheduler:
+  t_initial: 10000
+
+dataset:
+  batch_size: ${eval:"4 if ${train.gpu_mem} < 24 else (8 if ${train.gpu_mem} < 45 else 16)"}
+  batch_size_eval: ${eval:"4 if ${train.gpu_mem} < 24 else (8 if ${train.gpu_mem} < 45 else 16)"}
+  max_length: 2048
+
+model:
+  _name_: lm
+  # d_model: 864
+  d_model: 1120 # bigger to parameter match
+  n_layer: 18
+  d_inner: ${eval:2*${.d_model}}
+  vocab_size: 50257
+  resid_dropout: 0.0
+  embed_dropout: 0.1
+  layer:
+    _name_: multihyena
+    emb_dim: 33 
+    filter_order: 64 
+    local_order: 3
+    num_heads: 8
+    l_max: ${dataset.max_length}
+    fused_fft_conv: True
+    modulate: True
+    w: 14
+    lr: ${optimizer.lr}
+    lr_pos_emb: ${optimizer.lr}
+  # fused_mlp: True
+  fused_dropout_add_ln: False
+  residual_in_fp32: True
+  pad_vocab_size_multiple: 8
+  identity_mlp: True # replace MLP layers with an identity
