@@ -110,6 +110,11 @@ python -m train experiment=pile/hyena-150b-tokens trainer.max_steps=20000 train.
 python -m train experiment=pile/hyena-150b-tokens trainer.max_steps=30000 train.scheduler.t_initial=30000 # 15B tokens
 ```
 
+To run an M2-GPT model, use the `m2-gpt-150m-5b-tokens.yaml` config:
+```
+python -m train experiment=pile/m2-gpt-150m-5b-tokens
+```
+
 ## Downstream Evaluations
 
 Hyena small checkpoint is available at `https://huggingface.co/Zymrael/hyena-small-150b-tok`.
