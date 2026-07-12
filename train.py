@@ -333,7 +333,7 @@ class SequenceLightningModule(pl.LightningModule):
 
         # Calculate torchmetrics
         torchmetrics = getattr(self, f'{prefix}_torchmetrics')
-        torchmetrics(x, y, loss=loss)
+        torchmetrics(x, y, loss=w.get("metric_loss", loss))
         
         log_on_step = 'eval' in self.hparams and self.hparams.eval.get('log_on_step', False) and prefix == 'train'
 

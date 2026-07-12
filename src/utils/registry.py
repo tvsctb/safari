@@ -23,6 +23,8 @@ model = {
     "model": "src.models.sequence.SequenceModel",
     "lm": "src.models.sequence.long_conv_lm.ConvLMHeadModel",
     "lm_simple": "src.models.sequence.simple_lm.SimpleLMHeadModel",
+    "gru_aux_lm": "src.models.sequence.gru_aux.GRUAuxLM",
+    "rmt_aux_lm": "src.models.sequence.rmt_aux.RMTAuxLM",
     "vit_b_16": "src.models.baselines.vit_all.vit_base_patch16_224",
 }
 

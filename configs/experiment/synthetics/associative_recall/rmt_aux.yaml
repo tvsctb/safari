@@ -1,0 +1,23 @@
+# @package _global_
+defaults:
+  - /experiment/synthetics/associative_recall/base.yaml
+
+model:
+  _name_: rmt_aux_lm
+  d_model: 64
+  n_layer: 2
+  d_inner: 256
+  n_heads: 4
+  vocab_size: ${dataset.vocab_size}
+  chunk_size: 4
+  num_memory_tokens: 4
+  dropout: 0.0
+  random_chunk_offset: false
+  share_inverse: true
+
+task:
+  _name_: aux_lm
+  loss: cross_entropy
+  aux_weight: 1.0
+  torchmetrics: ['perplexity']
+  metrics: ['accuracy_ignore_index']

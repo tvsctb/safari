@@ -180,6 +180,55 @@ class LMTask(BaseTask):
 
         return x, y, w
 
+
+class AuxLMTask(LMTask):
+    """Language modeling task that adds a model-provided inverse auxiliary."""
+
+    def __init__(self, aux_weight=1.0, **kwargs):
+        self.aux_weight = aux_weight
+        super().__init__(**kwargs)
+        self.lm_loss = self.loss
+        self.loss = self._training_loss
+        self.loss_val = self.lm_loss
+
+    def _training_loss(self, logits, targets, aux_loss=None, **kwargs):
+        loss = self.lm_loss(logits, targets)
+        if aux_loss is not None:
+            loss = loss + self.aux_weight * aux_loss
+        return loss
+
+    def forward(self, batch, encoder, model, decoder, _state):
+        x, y, *z = batch
+        if len(z) == 0:
+            z = {}
+        else:
+            assert len(z) == 1 and isinstance(z[0], dict)
+            z = z[0]
+
+        x, w = encoder(x, **z)
+        output, state = model(
+            x,
+            **w,
+            state=_state,
+            targets=y,
+            compute_aux=model.training and self.aux_weight != 0.0,
+        )
+        output, w = decoder(output, state=state, **z)
+        w["aux_loss"] = output.aux_loss
+        logits = rearrange(output.logits, '... C -> (...) C')
+        targets = rearrange(y, '... -> (...)')
+        w["metric_loss"] = self.lm_loss(logits, targets)
+        return logits, targets, w
+
+    def metrics(self, x, y, aux_loss=None, metric_loss=None, **kwargs):
+        metrics = super().metrics(x, y, **kwargs)
+        metrics["lm_loss"] = (
+            self.lm_loss(x, y) if metric_loss is None else metric_loss
+        ).detach()
+        if aux_loss is not None:
+            metrics["aux_loss"] = aux_loss.detach()
+        return metrics
+
 class ForecastingTask(BaseTask):
 
     class DummyModule(nn.Module):
@@ -365,6 +414,7 @@ class ImageNetTask(BaseTask):
 registry = {
     'base': BaseTask,
     'lm': LMTask,
+    'aux_lm': AuxLMTask,
     'imagenet': ImageNetTask,
     'forecasting': ForecastingTask,
     'video': VideoTask,
