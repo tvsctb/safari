@@ -7,6 +7,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /workspace/safari
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        rsync \
+        tmux \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements-aux.txt /tmp/requirements-aux.txt
 RUN python -m pip install --upgrade pip \
     && python -m pip install -r /tmp/requirements-aux.txt
