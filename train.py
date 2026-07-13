@@ -73,8 +73,8 @@ class CustomWandbLogger(WandbLogger):
     def __init__(self, *args, **kwargs):
         """Modified logger that insists on a wandb.init() call and catches wandb's error if thrown."""
 
-        super().__init__(*args, **kwargs)
         self._hydra_files_saved = False
+        super().__init__(*args, **kwargs)
 
     def _save_hydra_files(self):
         """Keep the exact composed config and CLI overrides with the W&B run."""
