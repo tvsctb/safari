@@ -4,7 +4,8 @@ set -euo pipefail
 
 python -c 'import os; key=os.environ.get("WANDB_API_KEY", ""); assert key and key != "WANDB_API_KEY", "WANDB_API_KEY secret was not injected"'
 
-group="${WANDB_GROUP:-gru-fixed-scale-3x3-20260713}"
+group="${WANDB_GROUP:-gru-fixed-scale-3x3-20260713-v2}"
+suffix="${RUN_SUFFIX:-v2}"
 output_root="${OUTPUT_ROOT:-/tmp/safari-gru-fixed-scale-3x3}"
 mkdir -p "$output_root"
 
@@ -39,16 +40,16 @@ launch() {
   names+=("$name")
 }
 
-launch gru-baseline-s0 0.0 1.0 1.0
-launch gru-rho0p1-tau0p1-s0 0.1 0.1 0.1
-launch gru-rho0p1-tau0p3-s0 0.1 0.1 0.3
-launch gru-rho0p1-tau1p0-s0 0.1 0.1 1.0
-launch gru-rho0p3-tau0p1-s0 0.1 0.3 0.1
-launch gru-rho0p3-tau0p3-s0 0.1 0.3 0.3
-launch gru-rho0p3-tau1p0-s0 0.1 0.3 1.0
-launch gru-rho1p0-tau0p1-s0 0.1 1.0 0.1
-launch gru-rho1p0-tau0p3-s0 0.1 1.0 0.3
-launch gru-rho1p0-tau1p0-s0 0.1 1.0 1.0
+launch "gru-baseline-s0-$suffix" 0.0 1.0 1.0
+launch "gru-rho0p1-tau0p1-s0-$suffix" 0.1 0.1 0.1
+launch "gru-rho0p1-tau0p3-s0-$suffix" 0.1 0.1 0.3
+launch "gru-rho0p1-tau1p0-s0-$suffix" 0.1 0.1 1.0
+launch "gru-rho0p3-tau0p1-s0-$suffix" 0.1 0.3 0.1
+launch "gru-rho0p3-tau0p3-s0-$suffix" 0.1 0.3 0.3
+launch "gru-rho0p3-tau1p0-s0-$suffix" 0.1 0.3 1.0
+launch "gru-rho1p0-tau0p1-s0-$suffix" 0.1 1.0 0.1
+launch "gru-rho1p0-tau0p3-s0-$suffix" 0.1 1.0 0.3
+launch "gru-rho1p0-tau1p0-s0-$suffix" 0.1 1.0 1.0
 
 status=0
 for index in "${!pids[@]}"; do
