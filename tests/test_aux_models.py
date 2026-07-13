@@ -8,6 +8,7 @@ from src.models.sequence.auxiliary import (
     chunk_ranges,
     cross_entropy_sum,
     gaussian_nll_sum,
+    role_inverse_targets,
     terminal_gaussian_nll,
 )
 from src.models.sequence.gru_aux import GRUAuxLM
@@ -19,6 +20,15 @@ class AuxiliaryUtilityTest(unittest.TestCase):
         self.assertEqual(chunk_ranges(10, 4, 0), [(0, 4), (4, 8), (8, 10)])
         self.assertEqual(chunk_ranges(10, 4, 2), [(0, 2), (2, 6), (6, 10)])
 
+    def test_minibatch_offset_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "fixed, sequence"):
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                random_chunk_offset="minibatch",
+            )
+
     def test_boundary_reverse_alignment(self):
         chunk = torch.tensor([[11, 12, 13, 14]])
         boundary = torch.tensor([10])
@@ -29,6 +39,21 @@ class AuxiliaryUtilityTest(unittest.TestCase):
         torch.testing.assert_close(data_inputs, torch.tensor([[14, 13, 12, 11]]))
         torch.testing.assert_close(targets, torch.tensor([[13, 12, 11, 10]]))
         self.assertEqual(memory_inputs.shape, (1, 1, 3))
+
+    def test_role_scheme_alignments(self):
+        chunk = torch.tensor([[11, 12, 13, 14]])
+        reverse_inputs, reverse_targets = role_inverse_targets(
+            chunk, "role_reverse"
+        )
+        forward_inputs, forward_targets = role_inverse_targets(
+            chunk, "role_forward"
+        )
+        torch.testing.assert_close(
+            reverse_inputs, torch.tensor([[14, 13, 12, 11]])
+        )
+        torch.testing.assert_close(reverse_targets, reverse_inputs)
+        torch.testing.assert_close(forward_inputs, chunk)
+        torch.testing.assert_close(forward_targets, chunk)
 
     def test_report_losses_sum_within_sequence(self):
         batch_size = 2
@@ -51,6 +76,27 @@ class AuxiliaryUtilityTest(unittest.TestCase):
         self.assertEqual(memory_loss.item(), 3.0)
         self.assertEqual(terminal_loss.item(), 3.0)
 
+    def test_layerwise_and_slotwise_gaussian_scales(self):
+        reference = torch.zeros(())
+        gru_state = torch.ones(2, 1, 3)
+        gru_scale = torch.tensor([1.0, 2.0])
+        gru_loss = terminal_gaussian_nll(
+            gru_state, gru_scale, batch_size=1, scale_axis=0
+        )
+        expected_gru = 3 * 0.5 + 3 * (0.125 + torch.log(torch.tensor(2.0)))
+        torch.testing.assert_close(gru_loss, expected_gru)
+
+        rmt_state = torch.ones(1, 2, 3)
+        rmt_loss = gaussian_nll_sum(
+            [rmt_state],
+            [torch.zeros_like(rmt_state)],
+            gru_scale,
+            reference,
+            batch_size=1,
+            scale_axis=1,
+        )
+        torch.testing.assert_close(rmt_loss, expected_gru)
+
 
 class AuxModelTest(unittest.TestCase):
     def setUp(self):
@@ -66,6 +112,8 @@ class AuxModelTest(unittest.TestCase):
                 vocab_size=20,
                 chunk_size=4,
                 random_chunk_offset=False,
+                scale_mode="learned",
+                use_direction_embedding=True,
             ),
             RMTAuxLM(
                 d_model=16,
@@ -75,7 +123,8 @@ class AuxModelTest(unittest.TestCase):
                 vocab_size=20,
                 chunk_size=4,
                 num_memory_tokens=2,
-                random_chunk_offset=False,
+                scale_mode="learned",
+                use_direction_embedding=True,
             ),
         ]
 
@@ -180,7 +229,6 @@ class AuxModelTest(unittest.TestCase):
             vocab_size=20,
             chunk_size=4,
             num_memory_tokens=2,
-            random_chunk_offset=False,
         )
         sequence_lengths = []
 
@@ -223,7 +271,6 @@ class AuxModelTest(unittest.TestCase):
             vocab_size=20,
             chunk_size=4,
             num_memory_tokens=2,
-            random_chunk_offset=False,
             share_inverse=False,
         )
         rmt_inverse_shapes = []
@@ -253,6 +300,9 @@ class AuxModelTest(unittest.TestCase):
         gru = GRUAuxLM(d_model=8, n_layer=1, vocab_size=20)
         self.assertEqual(gru.chunk_size, 4)
         self.assertTrue(gru.random_chunk_offset)
+        self.assertEqual(gru.scale_mode, "fixed")
+        self.assertFalse(hasattr(gru, "log_rho"))
+        self.assertFalse(hasattr(gru, "log_tau"))
         self.assertIs(gru.gru, gru.inverse_gru)
         self.assertEqual(gru.memory_token_id, 20)
 
@@ -264,7 +314,11 @@ class AuxModelTest(unittest.TestCase):
             vocab_size=20,
         )
         self.assertEqual(rmt.chunk_size, 4)
-        self.assertFalse(rmt.random_chunk_offset)
+        self.assertFalse(hasattr(rmt, "random_chunk_offset"))
+        self.assertFalse(hasattr(rmt, "chunk_offset_mode"))
+        self.assertEqual(rmt.scale_mode, "fixed")
+        self.assertFalse(hasattr(rmt, "log_rho"))
+        self.assertFalse(hasattr(rmt, "log_tau"))
         self.assertIs(rmt.blocks, rmt.inverse_blocks)
 
     def test_untied_mode_shares_embedding_and_vocabulary_head(self):
@@ -317,6 +371,431 @@ class AuxModelTest(unittest.TestCase):
         output.aux_loss.backward()
         self.assertIsNotNone(rmt.embedding.weight.grad)
         self.assertIsNotNone(rmt.inverse_position_embedding.grad)
+
+    def test_all_token_schemes(self):
+        for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
+            models = [
+                GRUAuxLM(
+                    d_model=8,
+                    n_layer=1,
+                    vocab_size=20,
+                    token_scheme=token_scheme,
+                    random_chunk_offset=False,
+                    use_direction_embedding=(token_scheme == "boundary_reverse"),
+                ),
+                RMTAuxLM(
+                    d_model=8,
+                    n_layer=1,
+                    d_inner=16,
+                    n_heads=2,
+                    vocab_size=20,
+                    num_memory_tokens=2,
+                    token_scheme=token_scheme,
+                    use_direction_embedding=(token_scheme == "boundary_reverse"),
+                ),
+            ]
+            for model in models:
+                with self.subTest(
+                    token_scheme=token_scheme, model=type(model).__name__
+                ):
+                    output, _ = model(
+                        self.inputs, targets=self.targets, compute_aux=True
+                    )
+                    self.assertEqual(output.logits.shape, (2, 10, 20))
+                    self.assertTrue(torch.isfinite(output.aux_loss))
+                    if token_scheme == "boundary_reverse":
+                        self.assertIsNotNone(model.direction_embedding)
+                        self.assertGreater(
+                            model.metrics["aux/discrete_ce"].item(), 0.0
+                        )
+                    else:
+                        self.assertIsNone(model.direction_embedding)
+                        self.assertEqual(
+                            model.metrics["aux/discrete_ce"].item(), 0.0
+                        )
+
+    def test_gru_memory_token_is_optional(self):
+        observed_lengths = []
+        model = GRUAuxLM(
+            d_model=8,
+            n_layer=1,
+            vocab_size=20,
+            use_memory_token=False,
+            share_inverse=False,
+            random_chunk_offset=False,
+        )
+        handle = model.inverse_gru.register_forward_pre_hook(
+            lambda module, args: observed_lengths.append(args[0].size(1))
+        )
+        try:
+            model(self.inputs, targets=self.targets, compute_aux=True)
+        finally:
+            handle.remove()
+        self.assertEqual(observed_lengths, [4])
+
+        role_model = GRUAuxLM(
+            d_model=8,
+            n_layer=1,
+            vocab_size=20,
+            token_scheme="role_reverse",
+            use_memory_token=True,
+            share_inverse=False,
+            random_chunk_offset=False,
+        )
+        role_lengths = []
+        handle = role_model.inverse_gru.register_forward_pre_hook(
+            lambda module, args: role_lengths.append(args[0].size(1))
+        )
+        try:
+            role_model(self.inputs, targets=self.targets, compute_aux=True)
+        finally:
+            handle.remove()
+        self.assertEqual(role_lengths, [6])
+
+    def test_fixed_scales_are_hyperparameters(self):
+        gru = GRUAuxLM(
+            d_model=8,
+            n_layer=2,
+            vocab_size=20,
+            scale_mode="fixed",
+            scale_granularity="layerwise",
+            rho=[0.3, 1.0],
+            tau=[1.0, 3.0],
+            random_chunk_offset=False,
+        )
+        self.assertFalse(hasattr(gru, "log_rho"))
+        self.assertFalse(hasattr(gru, "log_tau"))
+        torch.testing.assert_close(gru.rho, torch.tensor([0.3, 1.0]))
+        torch.testing.assert_close(gru.tau, torch.tensor([1.0, 3.0]))
+        output, _ = gru(self.inputs, targets=self.targets, compute_aux=True)
+        output.aux_loss.backward()
+        self.assertIsNotNone(gru.gru.weight_ih_l0.grad)
+
+        rmt = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            num_memory_tokens=2,
+            scale_mode="fixed",
+            scale_granularity="slotwise",
+            rho=[0.3, 1.0],
+            tau=[1.0, 3.0],
+        )
+        output, _ = rmt(self.inputs, targets=self.targets, compute_aux=True)
+        self.assertTrue(torch.isfinite(output.aux_loss))
+        self.assertEqual(rmt.metrics["aux/rho/0"].item(), rmt.rho[0].item())
+        self.assertEqual(rmt.metrics["aux/tau/1"].item(), rmt.tau[1].item())
+
+    def test_component_level_partial_sharing(self):
+        for model in (
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                share_inverse=False,
+                share_inverse_embedding=False,
+                share_inverse_head=False,
+            ),
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                num_memory_tokens=2,
+                share_inverse=False,
+                share_inverse_embedding=False,
+                share_inverse_head=False,
+            ),
+        ):
+            with self.subTest(model=type(model).__name__):
+                self.assertIsNot(model.embedding, model.inverse_embedding)
+                self.assertTrue(hasattr(model, "inverse_head"))
+                output, _ = model(
+                    self.inputs, targets=self.targets, compute_aux=True
+                )
+                output.aux_loss.backward()
+                self.assertIsNotNone(model.inverse_embedding.weight.grad)
+                self.assertIsNotNone(model.inverse_head.weight.grad)
+
+    def test_direction_embedding_option(self):
+        shared_boundary_models = [
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                use_direction_embedding=True,
+            ),
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                use_direction_embedding=True,
+            ),
+        ]
+        for model in shared_boundary_models:
+            with self.subTest(model=type(model).__name__, mode="enabled"):
+                self.assertTrue(model.use_direction_embedding)
+                self.assertIsNotNone(model.direction_embedding)
+
+        disabled_models = [
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                use_direction_embedding=False,
+            ),
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                use_direction_embedding=False,
+            ),
+        ]
+        for model in disabled_models:
+            with self.subTest(model=type(model).__name__, mode="disabled"):
+                self.assertFalse(model.use_direction_embedding)
+                self.assertIsNone(model.direction_embedding)
+
+        role_enabled = GRUAuxLM(
+            d_model=8,
+            n_layer=1,
+            vocab_size=20,
+            token_scheme="role_reverse",
+            use_direction_embedding=True,
+        )
+        self.assertFalse(role_enabled.use_direction_embedding)
+        self.assertIsNone(role_enabled.direction_embedding)
+
+        untied_enabled_models = [
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                share_inverse=False,
+                use_direction_embedding=True,
+            ),
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                share_inverse_embedding=False,
+                use_direction_embedding=True,
+            ),
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                share_inverse_embedding=False,
+                use_direction_embedding=True,
+            ),
+        ]
+        for model in untied_enabled_models:
+            with self.subTest(model=type(model).__name__, mode="untied"):
+                self.assertTrue(model.use_direction_embedding)
+                self.assertIsNotNone(model.direction_embedding)
+
+        head_only_untied = GRUAuxLM(
+            d_model=8,
+            n_layer=1,
+            vocab_size=20,
+            share_inverse_head=False,
+        )
+        self.assertFalse(head_only_untied.use_direction_embedding)
+        self.assertIsNone(head_only_untied.direction_embedding)
+
+    def test_per_sequence_random_offsets(self):
+        model = GRUAuxLM(
+            d_model=8,
+            n_layer=1,
+            vocab_size=20,
+            random_chunk_offset="sequence",
+        )
+        output, state = model(
+            self.inputs, targets=self.targets, compute_aux=True
+        )
+        self.assertEqual(output.logits.shape, (2, 10, 20))
+        self.assertTrue(torch.isfinite(output.aux_loss))
+        self.assertTrue(torch.isfinite(state).all())
+
+    def test_chunk_offset_is_not_configurable(self):
+        with self.assertRaisesRegex(ValueError, "always 0"):
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                random_chunk_offset="fixed",
+                chunk_offset=2,
+            )
+        with self.assertRaisesRegex(ValueError, "always 0"):
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                chunk_offset=1,
+            )
+
+    def test_rmt_random_chunk_offset_option_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "fixed at 0"):
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                random_chunk_offset="sequence",
+            )
+
+    def test_gru_state_type_scale_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "global, layerwise"):
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                scale_granularity="state_type",
+            )
+
+    def test_rmt_role_terminal_is_query_free(self):
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            chunk_size=4,
+            num_memory_tokens=2,
+            token_scheme="role_reverse",
+        )
+        sequence_lengths = []
+        handle = model.blocks[0].register_forward_pre_hook(
+            lambda module, args: sequence_lengths.append(args[0].size(1))
+        )
+        try:
+            model.eval()
+            model(self.inputs, targets=self.targets, compute_aux=False)
+        finally:
+            handle.remove()
+        # Two transitions: 2 memory + 5 token + 2 query. Terminal: no queries.
+        self.assertEqual(sequence_lengths, [9, 9, 5])
+
+    def test_role_models_share_the_same_unmasked_chunks(self):
+        aux_tokens = torch.arange(10).unsqueeze(0).expand(2, -1)
+        expected = torch.cat((aux_tokens[:, :4], aux_tokens[:, 4:8]), dim=0)
+        models = [
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                token_scheme="role_reverse",
+                random_chunk_offset=False,
+            ),
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                num_memory_tokens=2,
+                token_scheme="role_reverse",
+            ),
+        ]
+        for model in models:
+            captured = []
+            original = model._inverse_record
+
+            def capture(chunks, *args):
+                captured.append(chunks.detach().clone())
+                return original(chunks, *args)
+
+            model._inverse_record = capture
+            with self.subTest(model=type(model).__name__):
+                model(
+                    self.inputs,
+                    targets=self.targets,
+                    aux_tokens=aux_tokens,
+                    compute_aux=True,
+                )
+                self.assertEqual(len(captured), 1)
+                torch.testing.assert_close(captured[0], expected)
+
+    def test_rmt_role_accepts_masked_loss_targets(self):
+        aux_tokens = self.targets.clone()
+        masked_targets = torch.full_like(self.targets, -100)
+        masked_targets[:, -1] = aux_tokens[:, -1]
+        for token_scheme in ("role_reverse", "role_forward"):
+            model = RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                num_memory_tokens=2,
+                token_scheme=token_scheme,
+            )
+            with self.subTest(token_scheme=token_scheme):
+                model.eval()
+                output, _ = model(
+                    self.inputs,
+                    targets=masked_targets,
+                    aux_tokens=aux_tokens,
+                    compute_aux=False,
+                )
+                self.assertEqual(output.logits.shape, (2, 10, 20))
+                self.assertTrue(torch.isfinite(output.logits).all())
+
+    def test_rmt_role_inference_uses_explicit_token_stream(self):
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            num_memory_tokens=2,
+            token_scheme="role_forward",
+        )
+        model.eval()
+        output, _ = model(
+            self.inputs,
+            targets=None,
+            aux_tokens=self.targets,
+            compute_aux=False,
+        )
+        self.assertEqual(output.logits.shape, (2, 10, 20))
+        with self.assertRaisesRegex(ValueError, "unmasked aux_tokens"):
+            model(self.inputs, targets=None, compute_aux=False)
+
+    def test_gru_role_state_boundaries_match_aux_chunks(self):
+        model = GRUAuxLM(
+            d_model=8,
+            n_layer=1,
+            vocab_size=20,
+            token_scheme="role_reverse",
+            dropout=0.0,
+            random_chunk_offset=False,
+        )
+        model.eval()
+        output, terminal_memory = model(
+            self.inputs,
+            targets=self.targets,
+            aux_tokens=self.targets,
+            compute_aux=True,
+        )
+        direct_output, _ = model.gru(model.embedding(self.inputs))
+        _, expected_terminal_memory = model.gru(
+            model.embedding(self.inputs[:, :9])
+        )
+        torch.testing.assert_close(output.logits, model._lm_logits(direct_output))
+        torch.testing.assert_close(terminal_memory, expected_terminal_memory)
 
 
 if __name__ == "__main__":

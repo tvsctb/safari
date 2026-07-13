@@ -169,6 +169,15 @@ def generate_assoc_recall(
 class ICLDataModule(SequenceDataset):
     _name_ = "icl_synthetics"
 
+    @classmethod
+    def _return_callback(cls, return_value, *args, **kwargs):
+        x, y, *extra = return_value
+        if not extra:
+            return x, y, {}
+        if len(extra) != 1:
+            raise ValueError("ICLDataModule expects at most one auxiliary token stream")
+        return x, y, {"aux_tokens": extra[0]}
+
     def __init__(
         self,
         num_examples: int,
@@ -186,6 +195,7 @@ class ICLDataModule(SequenceDataset):
         max_copy_len: int = 10,
         test_seq_len: int = None,
         num_keys: int = 1, # number of keys for associative recall,
+        return_aux_tokens: bool = False,
         data_dir: str = None,
         *args, **kwargs
     ):
@@ -203,6 +213,7 @@ class ICLDataModule(SequenceDataset):
         self.induction_num_triggers = induction_num_triggers
         self.allow_dot = allow_dot
         self.max_copy_len = max_copy_len
+        self.return_aux_tokens = return_aux_tokens
         self.data_dir = data_dir
         
         if test_seq_len is not None:
@@ -311,25 +322,47 @@ class ICLDataModule(SequenceDataset):
                     f"test_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt")
                 )
              
+        def make_dataset(tensor):
+            inputs = tensor[:, 0, :]
+            labels = tensor[:, 1, :]
+            if not self.return_aux_tokens:
+                return TensorDataset(inputs, labels)
+            # Recover the unmasked next-token stream. The last label is retained
+            # by this dataset's masking rules; all earlier tokens come from the
+            # shifted input stream, including when loading an old masked cache.
+            aux_tokens = torch.cat((inputs[:, 1:], labels[:, -1:]), dim=1)
+            if torch.any(aux_tokens < 0):
+                raise ValueError("auxiliary token stream must not contain loss masks")
+            return TensorDataset(inputs, labels, aux_tokens)
+
         self.dataset = {
-            'train': TensorDataset(train_tensor[:, 0, :], train_tensor[:, 1, :]),
-            'test': TensorDataset(test_tensor[:, 0, :], test_tensor[:, 1, :])
+            'train': make_dataset(train_tensor),
+            'test': make_dataset(test_tensor),
         }
 
     def train_dataloader(self, *args, **kwargs):
-        return self._data_loader(self.dataset['train'], shuffle=True)
+        return self._data_loader(self.dataset['train'], shuffle=True, **kwargs)
 
     def val_dataloader(self, *args, **kwargs):
-        return self._data_loader(self.dataset['test'], shuffle=False)
+        return self._data_loader(self.dataset['test'], shuffle=False, **kwargs)
 
     def test_dataloader(self, *args, **kwargs):
-        return self._data_loader(self.dataset['test'], shuffle=False)
+        return self._data_loader(self.dataset['test'], shuffle=False, **kwargs)
 
-    def _data_loader(self, dataset: Dataset, shuffle: bool = False) -> DataLoader:
+    def _data_loader(
+        self,
+        dataset: Dataset,
+        shuffle: bool = False,
+        num_workers: int = 10,
+        pin_memory: bool = True,
+        **kwargs,
+    ) -> DataLoader:
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
-            num_workers=10,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
             shuffle=shuffle,
-            persistent_workers=True
+            persistent_workers=num_workers > 0,
+            collate_fn=self._collate_fn,
         )

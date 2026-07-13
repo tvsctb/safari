@@ -2,19 +2,39 @@
 defaults:
   - /experiment/synthetics/associative_recall/base.yaml
 
+dataset:
+  return_aux_tokens: true
+
 model:
   _name_: gru_aux_lm
   d_model: 32
   n_layer: 2
   vocab_size: ${dataset.vocab_size}
+  # Report options: boundary_reverse | role_reverse | role_forward
+  token_scheme: boundary_reverse
   chunk_size: 4
   dropout: 0.0
-  random_chunk_offset: true
+  # fixed | sequence
+  random_chunk_offset: sequence
+  use_memory_token: true
+  # Component-level switches cover shared, partially untied, and untied modes.
   share_inverse: true
+  share_inverse_embedding: true
+  share_inverse_head: true
+  # Boundary-scheme switch; independent of parameter sharing.
+  use_direction_embedding: true
+  # The planned GRU sweep treats both Gaussian scales as fixed hyperparameters.
+  scale_mode: fixed
+  # global | layerwise
+  scale_granularity: global
+  rho: 1.0
+  tau: 1.0
+  min_scale: 1e-4
+  max_scale: 1e4
 
 task:
   _name_: aux_lm
   loss: cross_entropy
-  aux_weight: 1.0
+  aux_weight: 0.1
   torchmetrics: ['perplexity']
   metrics: ['accuracy_ignore_index']

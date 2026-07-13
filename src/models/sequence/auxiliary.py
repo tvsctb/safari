@@ -9,6 +9,90 @@ class AuxCausalLMOutput(NamedTuple):
     aux_loss: torch.Tensor
 
 
+TOKEN_SCHEMES = {
+    "boundary_reverse",
+    "role_reverse",
+    "role_forward",
+}
+
+
+def normalize_token_scheme(token_scheme):
+    aliases = {
+        "boundary": "boundary_reverse",
+        "boundary-reverse": "boundary_reverse",
+        "role-reverse": "role_reverse",
+        "role-forward": "role_forward",
+    }
+    token_scheme = aliases.get(token_scheme, token_scheme)
+    if token_scheme not in TOKEN_SCHEMES:
+        choices = ", ".join(sorted(TOKEN_SCHEMES))
+        raise ValueError(f"token_scheme must be one of: {choices}")
+    return token_scheme
+
+
+def normalize_offset_mode(random_chunk_offset):
+    if isinstance(random_chunk_offset, bool):
+        return "sequence" if random_chunk_offset else "fixed"
+    aliases = {
+        "random": "sequence",
+        "random_sequence": "sequence",
+        "per_sequence": "sequence",
+    }
+    mode = aliases.get(random_chunk_offset, random_chunk_offset)
+    if mode not in {"fixed", "sequence"}:
+        raise ValueError(
+            "random_chunk_offset must be a bool or one of fixed, sequence"
+        )
+    return mode
+
+
+def resolve_direction_embedding(
+    option,
+    token_scheme,
+):
+    """Apply the explicit switch on the boundary scheme where it is defined."""
+    if not isinstance(option, bool):
+        raise ValueError("use_direction_embedding must be true or false")
+    return option and token_scheme == "boundary_reverse"
+
+
+def validate_scale_configuration(mode, granularity, allowed_granularities):
+    if mode not in {"fixed", "learned"}:
+        raise ValueError("scale_mode must be 'fixed' or 'learned'")
+    if granularity not in allowed_granularities:
+        choices = ", ".join(sorted(allowed_granularities))
+        raise ValueError(f"scale_granularity must be one of: {choices}")
+
+
+def scale_tensor(value, size, granularity, name):
+    tensor = torch.as_tensor(value, dtype=torch.float32)
+    expected = 1 if granularity == "global" else size
+    if tensor.numel() not in {1, expected}:
+        raise ValueError(f"{name} must contain 1 or {expected} positive values")
+    if tensor.numel() == 1 and expected > 1:
+        tensor = tensor.expand(expected).clone()
+    tensor = tensor.reshape(()) if expected == 1 else tensor.reshape(expected)
+    if not torch.isfinite(tensor).all() or not (tensor > 0).all():
+        raise ValueError(f"{name} must contain finite positive values")
+    return tensor
+
+
+def initialize_scale(module, name, value, size, mode, granularity):
+    value = scale_tensor(value, size, granularity, name)
+    if mode == "learned":
+        module.register_parameter(f"log_{name}", torch.nn.Parameter(value.log()))
+    else:
+        module.register_buffer(name, value)
+
+
+def configured_scale(module, name, mode, minimum=1e-4, maximum=1e4):
+    if mode == "learned":
+        return bounded_exp(
+            getattr(module, f"log_{name}"), minimum=minimum, maximum=maximum
+        )
+    return getattr(module, name)
+
+
 def chunk_ranges(length, chunk_size, offset=0):
     """Partition a sequence, optionally placing the first boundary before B."""
     if length <= 0:
@@ -50,6 +134,17 @@ def boundary_inverse_batch(chunk, boundary, memory_embedding):
     return data_inputs, memory_inputs, data_targets
 
 
+def role_inverse_targets(chunk, token_scheme):
+    """Return role-scheme data order and the B vocabulary targets."""
+    token_scheme = normalize_token_scheme(token_scheme)
+    if token_scheme == "boundary_reverse":
+        raise ValueError("role_inverse_targets requires a role token scheme")
+    if chunk.ndim != 2 or chunk.size(1) == 0:
+        raise ValueError("chunk must have shape (batch, nonzero length)")
+    ordered = chunk.flip(1) if token_scheme == "role_reverse" else chunk
+    return ordered, ordered
+
+
 def cross_entropy_sum(logits, targets, reference, batch_size):
     """Sum token losses within each sequence, then average the minibatch."""
     if not logits:
@@ -61,28 +156,43 @@ def cross_entropy_sum(logits, targets, reference, batch_size):
     ) / batch_size
 
 
-def gaussian_nll_sum(targets, estimates, scale, reference, batch_size):
+def _broadcast_state_scale(scale, value, scale_axis):
+    if scale.ndim == 0:
+        return scale
+    if scale_axis < 0:
+        scale_axis += value.ndim
+    if not 0 <= scale_axis < value.ndim:
+        raise ValueError("scale_axis is outside the state tensor")
+    if value.size(scale_axis) != scale.numel():
+        raise ValueError("scale length does not match its state axis")
+    shape = [1] * value.ndim
+    shape[scale_axis] = scale.numel()
+    return scale.reshape(shape)
+
+
+def gaussian_nll_sum(
+    targets, estimates, scale, reference, batch_size, scale_axis=0
+):
     """Sum Gaussian coordinates and chunks, then average the minibatch."""
     if not targets:
         return reference.new_zeros(())
-    squared_error = torch.stack([
-        (target - estimate).float().pow(2).sum()
-        for target, estimate in zip(targets, estimates)
-    ]).sum()
-    coordinates = sum(target.numel() for target in targets) / batch_size
-    return (
-        squared_error / (2.0 * scale.pow(2) * batch_size)
-        + coordinates * torch.log(scale)
-    )
+    losses = []
+    for target, estimate in zip(targets, estimates):
+        state_scale = _broadcast_state_scale(scale, target, scale_axis)
+        losses.append(
+            ((target - estimate).float().pow(2) / (2.0 * state_scale.pow(2)))
+            + torch.log(state_scale)
+        )
+    return torch.stack([loss.sum() for loss in losses]).sum() / batch_size
 
 
-def terminal_gaussian_nll(value, scale, batch_size):
+def terminal_gaussian_nll(value, scale, batch_size, scale_axis=0):
     """Evaluate the report's terminal Gaussian term per sequence."""
-    coordinates = value.numel() / batch_size
+    state_scale = _broadcast_state_scale(scale, value, scale_axis)
     return (
-        value.float().pow(2).sum() / (2.0 * scale.pow(2) * batch_size)
-        + coordinates * torch.log(scale)
-    )
+        value.float().pow(2) / (2.0 * state_scale.pow(2))
+        + torch.log(state_scale)
+    ).sum() / batch_size
 
 
 def bounded_exp(log_scale, minimum=1e-4, maximum=1e4):

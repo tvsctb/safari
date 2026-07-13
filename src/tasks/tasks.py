@@ -205,12 +205,14 @@ class AuxLMTask(LMTask):
             assert len(z) == 1 and isinstance(z[0], dict)
             z = z[0]
 
+        aux_tokens = z.pop("aux_tokens", None)
         x, w = encoder(x, **z)
         output, state = model(
             x,
             **w,
             state=_state,
             targets=y,
+            aux_tokens=aux_tokens,
             compute_aux=model.training and self.aux_weight != 0.0,
         )
         output, w = decoder(output, state=state, **z)

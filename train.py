@@ -1,4 +1,5 @@
 import copy
+import glob
 import os
 import random
 import time
@@ -73,6 +74,15 @@ class CustomWandbLogger(WandbLogger):
         """Modified logger that insists on a wandb.init() call and catches wandb's error if thrown."""
 
         super().__init__(*args, **kwargs)
+        self._hydra_files_saved = False
+
+    def _save_hydra_files(self):
+        """Keep the exact composed config and CLI overrides with the W&B run."""
+        if self._hydra_files_saved:
+            return
+        for path in glob.glob(os.path.join(".hydra", "*.yaml")):
+            self._experiment.save(path, base_path=os.getcwd(), policy="now")
+        self._hydra_files_saved = True
 
     @property
     @rank_zero_experiment
@@ -116,6 +126,7 @@ class CustomWandbLogger(WandbLogger):
                     self._experiment.define_metric("trainer/global_step")
                     self._experiment.define_metric("*", step_metric="trainer/global_step", step_sync=True)
 
+        self._save_hydra_files()
         return self._experiment
 
 
@@ -607,7 +618,8 @@ def create_trainer(config, **kwargs):
         import wandb
 
         logger = CustomWandbLogger(
-            config=utils.to_dict(config, recursive=True),
+            # Resolve every Hydra interpolation before storing the complete config.
+            config=OmegaConf.to_container(config, resolve=True, enum_to_str=True),
             settings=wandb.Settings(start_method="fork"),
             **config.wandb,
         )
