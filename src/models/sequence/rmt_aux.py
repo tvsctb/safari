@@ -562,8 +562,12 @@ class RMTAuxLM(nn.Module):
                 "aux/total": aux_loss.detach(),
                 "aux/rho_mean": rho.detach().mean(),
                 "aux/tau_mean": tau.detach().mean(),
-                "aux/memory_batch_variance": mean_batch_variance(
-                    [record[3] for record in inverse_records], batch_axis=0
+                "aux/memory_batch_variance": (
+                    mean_batch_variance(
+                        [record[3] for record in inverse_records], batch_axis=0
+                    )
+                    if inverse_records
+                    else logits.detach().new_zeros(())
                 ),
                 "aux/terminal_batch_variance": mean_batch_variance(
                     [terminal_memory], batch_axis=0

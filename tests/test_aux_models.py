@@ -714,6 +714,9 @@ class AuxModelTest(unittest.TestCase):
                 self.assertEqual(model.metrics["aux/chunk_ce"].item(), 0.0)
                 self.assertEqual(model.metrics["aux/discrete_ce"].item(), 0.0)
                 self.assertEqual(model.metrics["aux/memory_nll"].item(), 0.0)
+                self.assertEqual(
+                    model.metrics["aux/memory_batch_variance"].item(), 0.0
+                )
                 initial_state = model.default_state(2, device=inputs.device)
                 torch.testing.assert_close(state, initial_state)
 
