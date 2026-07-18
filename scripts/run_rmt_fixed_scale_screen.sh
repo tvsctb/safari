@@ -8,8 +8,8 @@ set -euo pipefail
 python -c 'import os; key=os.environ.get("WANDB_API_KEY", ""); assert key and key != "WANDB_API_KEY", "WANDB_API_KEY secret was not injected"'
 
 wave="${EXPERIMENT_WAVE:-A}"
-if [[ "$wave" != "A" && "$wave" != "B" && "$wave" != "C" ]]; then
-  echo "EXPERIMENT_WAVE must be A, B, or C" >&2
+if [[ "$wave" != "A" && "$wave" != "B" && "$wave" != "C" && "$wave" != "D" ]]; then
+  echo "EXPERIMENT_WAVE must be A, B, C, or D" >&2
   exit 2
 fi
 
@@ -98,7 +98,7 @@ elif [[ "$wave" == "B" ]]; then
   launch "rho10-lambda0p1" 0.1 10.0
   launch "rho15-lambda0p1" 0.1 15.0
   launch "rho20-lambda0p1" 0.1 20.0
-else
+elif [[ "$wave" == "C" ]]; then
   # Follow-up around the first screen's effective-memory-gradient window.
   # The first condition changes only the seed of its leading candidate.
   launch "rho10-lambda0p03-rep" 0.03 10.0 1
@@ -106,6 +106,13 @@ else
   launch "rho12-lambda0p05" 0.05 12.0
   launch "rho15-lambda0p05" 0.05 15.0
   launch "rho15-lambda0p07" 0.07 15.0
+else
+  # Independent seeds for the first screen's two leading combinations.
+  launch "rho10-lambda0p03-rep" 0.03 10.0 2
+  launch "rho10-lambda0p03-rep" 0.03 10.0 3
+  launch "rho15-lambda0p1-rep" 0.1 15.0 1
+  launch "rho15-lambda0p1-rep" 0.1 15.0 2
+  launch "rho15-lambda0p1-rep" 0.1 15.0 3
 fi
 
 status=0
