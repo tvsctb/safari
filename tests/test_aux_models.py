@@ -10,6 +10,7 @@ from src.models.sequence.auxiliary import (
     chunk_ranges,
     cross_entropy_sum,
     gaussian_nll_sum,
+    mean_batch_variance,
     memory_reconstruction_target,
     noisy_generation,
     noisy_observation,
@@ -119,6 +120,15 @@ class AuxiliaryUtilityTest(unittest.TestCase):
         self.assertIsNone(target.grad)
         self.assertIsNotNone(estimate.grad)
         self.assertIs(memory_reconstruction_target(target, False), target)
+
+    def test_mean_batch_variance_does_not_mix_transition_time(self):
+        first = torch.tensor([[[0.0]], [[2.0]]])
+        second = torch.tensor([[[10.0]], [[14.0]]])
+        variance = mean_batch_variance([first, second], batch_axis=0)
+        self.assertEqual(variance.item(), 2.5)
+
+        singleton = mean_batch_variance([first[:1]], batch_axis=0)
+        self.assertEqual(singleton.item(), 0.0)
 
     def test_observation_noise_is_training_only(self):
         value = torch.zeros(2, 3)
@@ -281,6 +291,15 @@ class AuxModelTest(unittest.TestCase):
                 )
                 torch.testing.assert_close(
                     model.loss_components["total"], output.aux_loss
+                )
+                self.assertIn("aux/memory_batch_variance", model.metrics)
+                self.assertIn("aux/terminal_batch_variance", model.metrics)
+                self.assertIn("aux/memory_batch_variance/0", model.metrics)
+                self.assertGreaterEqual(
+                    model.metrics["aux/memory_batch_variance"].item(), 0.0
+                )
+                self.assertGreaterEqual(
+                    model.metrics["aux/terminal_batch_variance"].item(), 0.0
                 )
                 terminal_loss = terminal_gaussian_nll(
                     state, model.metrics["aux/tau"], self.inputs.size(0)

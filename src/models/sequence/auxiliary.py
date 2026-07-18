@@ -192,6 +192,17 @@ def memory_reconstruction_target(value, stop_gradient=False):
     return value.detach() if stop_gradient else value
 
 
+def mean_batch_variance(values, batch_axis):
+    """Average coordinate-wise population variance across the minibatch."""
+    if not values:
+        raise ValueError("values must contain at least one state tensor")
+    variances = [
+        value.detach().float().var(dim=batch_axis, correction=0).mean()
+        for value in values
+    ]
+    return torch.stack(variances).mean()
+
+
 def validate_observation_noise_std(value):
     """Return a finite, non-negative Gaussian observation-noise scale."""
     value = float(value)

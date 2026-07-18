@@ -12,6 +12,7 @@ from src.models.sequence.auxiliary import (
     cross_entropy_sum,
     gaussian_nll_sum,
     initialize_scale,
+    mean_batch_variance,
     memory_reconstruction_target,
     noisy_generation,
     noisy_observation,
@@ -481,6 +482,12 @@ class GRUAuxLM(nn.Module):
                 "aux/total": aux_loss.detach(),
                 "aux/rho_mean": rho.detach().mean(),
                 "aux/tau_mean": tau.detach().mean(),
+                "aux/memory_batch_variance": mean_batch_variance(
+                    [record[3] for record in inverse_records], batch_axis=1
+                ),
+                "aux/terminal_batch_variance": mean_batch_variance(
+                    [terminal_memory], batch_axis=1
+                ),
             }
             if rho.numel() == 1:
                 self.metrics["aux/rho"] = rho.detach().reshape(())
@@ -490,6 +497,10 @@ class GRUAuxLM(nn.Module):
                 self.metrics[f"aux/rho/{index}"] = value
             for index, value in enumerate(tau.detach().reshape(-1)):
                 self.metrics[f"aux/tau/{index}"] = value
+            for index, record in enumerate(inverse_records):
+                self.metrics[f"aux/memory_batch_variance/{index}"] = (
+                    mean_batch_variance([record[3]], batch_axis=1)
+                )
         else:
             self.metrics = {}
             self.loss_components = {}
