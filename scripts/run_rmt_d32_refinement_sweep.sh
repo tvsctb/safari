@@ -88,25 +88,26 @@ launch() {
 
 if [[ "$wave" == "D" ]]; then
   # Preserve both weakened continuous-state pressures while sweeping CE pressure.
-  launch "lambda0p25" 0.25 31.622777 6.324555 1e-3 0.1
-  launch "lambda0p5" 0.5 44.721360 8.944272 1e-3 0.1
-  launch "lambda1" 1.0 63.245553 12.649111 1e-3 0.1
-  launch "lambda2" 2.0 89.442719 17.888544 1e-3 0.1
-  launch "lambda4" 4.0 126.491106 25.298221 1e-3 0.1
+  launch "lambda0p25" 0.25 31.622777 6.324555 4e-3 0.1
+  launch "lambda0p5" 0.5 44.721360 8.944272 4e-3 0.1
+  launch "lambda1" 1.0 63.245553 12.649111 4e-3 0.1
+  launch "lambda2" 2.0 89.442719 17.888544 4e-3 0.1
+  launch "lambda4" 4.0 126.491106 25.298221 4e-3 0.1
 elif [[ "$wave" == "E" ]]; then
-  # LR refinement around lambda=1. The 1e-3 anchor is supplied by wave D.
-  launch "lr2e-4" 1.0 63.245553 12.649111 2e-4 0.1
-  launch "lr4e-4" 1.0 63.245553 12.649111 4e-4 0.1
-  launch "lr7e-4" 1.0 63.245553 12.649111 7e-4 0.1
-  launch "lr1p5e-3" 1.0 63.245553 12.649111 1.5e-3 0.1
+  # LR refinement around the 4e-3 transition found by the coarse screen.
+  # The 4e-3 anchor is supplied by wave D.
+  launch "lr1e-3" 1.0 63.245553 12.649111 1e-3 0.1
+  launch "lr2e-3" 1.0 63.245553 12.649111 2e-3 0.1
   launch "lr3e-3" 1.0 63.245553 12.649111 3e-3 0.1
+  launch "lr5e-3" 1.0 63.245553 12.649111 5e-3 0.1
+  launch "lr7e-3" 1.0 63.245553 12.649111 7e-3 0.1
 else
   # Weight-decay refinement. The 0.1 anchor is supplied by wave D.
-  launch "wd0" 1.0 63.245553 12.649111 1e-3 0.0
-  launch "wd1e-4" 1.0 63.245553 12.649111 1e-3 1e-4
-  launch "wd1e-3" 1.0 63.245553 12.649111 1e-3 1e-3
-  launch "wd1e-2" 1.0 63.245553 12.649111 1e-3 1e-2
-  launch "wd3e-2" 1.0 63.245553 12.649111 1e-3 3e-2
+  launch "wd0" 1.0 63.245553 12.649111 4e-3 0.0
+  launch "wd1e-4" 1.0 63.245553 12.649111 4e-3 1e-4
+  launch "wd1e-3" 1.0 63.245553 12.649111 4e-3 1e-3
+  launch "wd1e-2" 1.0 63.245553 12.649111 4e-3 1e-2
+  launch "wd3e-2" 1.0 63.245553 12.649111 4e-3 3e-2
 fi
 
 status=0
