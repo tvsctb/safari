@@ -8,8 +8,8 @@ set -euo pipefail
 python -c 'import os; key=os.environ.get("WANDB_API_KEY", ""); assert key and key != "WANDB_API_KEY", "WANDB_API_KEY secret was not injected"'
 
 wave="${EXPERIMENT_WAVE:-A}"
-if [[ "$wave" != "A" && "$wave" != "B" ]]; then
-  echo "EXPERIMENT_WAVE must be A or B" >&2
+if [[ "$wave" != "A" && "$wave" != "B" && "$wave" != "C" ]]; then
+  echo "EXPERIMENT_WAVE must be A, B, or C" >&2
   exit 2
 fi
 
@@ -66,11 +66,13 @@ launch() {
   local label="$1"
   local aux_weight="$2"
   local rho="$3"
-  local name="rmt-fixed-${label}-s0-${suffix}"
+  local seed="${4:-0}"
+  local name="rmt-fixed-${label}-s${seed}-${suffix}"
 
   echo "Launching $name (lambda=$aux_weight, rho=$rho, tau=3.0)"
   python -m train \
     "${common_args[@]}" \
+    train.seed="$seed" \
     task.aux_weight="$aux_weight" \
     model.rho="$rho" \
     wandb.mode=online \
@@ -90,12 +92,20 @@ if [[ "$wave" == "A" ]]; then
   launch "rho15-lambda0p01" 0.01 15.0
   launch "rho20-lambda0p01" 0.01 20.0
   launch "rho10-lambda0p03" 0.03 10.0
-else
+elif [[ "$wave" == "B" ]]; then
   launch "rho15-lambda0p03" 0.03 15.0
   launch "rho20-lambda0p03" 0.03 20.0
   launch "rho10-lambda0p1" 0.1 10.0
   launch "rho15-lambda0p1" 0.1 15.0
   launch "rho20-lambda0p1" 0.1 20.0
+else
+  # Follow-up around the first screen's effective-memory-gradient window.
+  # The first condition changes only the seed of its leading candidate.
+  launch "rho10-lambda0p03-rep" 0.03 10.0 1
+  launch "rho12-lambda0p03" 0.03 12.0
+  launch "rho12-lambda0p05" 0.05 12.0
+  launch "rho15-lambda0p05" 0.05 15.0
+  launch "rho15-lambda0p07" 0.07 15.0
 fi
 
 status=0
