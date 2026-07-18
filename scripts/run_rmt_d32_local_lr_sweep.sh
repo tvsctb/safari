@@ -27,7 +27,7 @@ common_args=(
   train.test=false
   loader.num_workers=0
   task.aux_gradient_norm_interval=157
-  task.aux_weight=3.0
+  task.aux_weight=1.0
   optimizer.weight_decay=0.1
   model.d_model=32
   model.d_inner=128
@@ -43,10 +43,10 @@ common_args=(
   model.stop_gradient_memory_target=true
   model.memory_scale_mode=fixed
   model.memory_scale_granularity=global
-  model.rho=54.772256
+  model.rho=63.245553
   model.terminal_scale_mode=fixed
   model.terminal_scale_granularity=global
-  model.tau=10.954451
+  model.tau=12.649111
   model.observation_noise_std=0.0
   model.generation_noise_std=0.0
 )
@@ -54,7 +54,7 @@ common_args=(
 pids=()
 names=()
 
-for entry in "lr2p5e-3:2.5e-3" "lr3e-3:3e-3" "lr3p5e-3:3.5e-3" "lr4p5e-3:4.5e-3" "lr5e-3:5e-3"; do
+for entry in "lr2p5e-3:2.5e-3" "lr2p75e-3:2.75e-3" "lr3p25e-3:3.25e-3" "lr3p5e-3:3.5e-3" "lr4e-3:4e-3"; do
   label="${entry%%:*}"
   learning_rate="${entry#*:}"
   name="rmt-d32-${label}-s0-${suffix}"
