@@ -242,6 +242,7 @@ class RMTAuxLM(nn.Module):
         )
         self.reset_parameters()
         self.metrics = {}
+        self.loss_components = {}
 
     def reset_parameters(self):
         nn.init.normal_(self.embedding.weight, std=0.02)
@@ -541,6 +542,14 @@ class RMTAuxLM(nn.Module):
                 + loss_terminal
                 + loss_terminal_chunk
             )
+            self.loss_components = {
+                "chunk_ce": loss_chunk,
+                "discrete_ce": loss_discrete,
+                "memory_nll": loss_memory,
+                "terminal_nll": loss_terminal,
+                "terminal_chunk": loss_terminal_chunk,
+                "total": aux_loss,
+            }
             self.metrics = {
                 "aux/chunk_ce": loss_chunk.detach(),
                 "aux/discrete_ce": loss_discrete.detach(),
@@ -561,6 +570,7 @@ class RMTAuxLM(nn.Module):
                 self.metrics[f"aux/tau/{index}"] = value
         else:
             self.metrics = {}
+            self.loss_components = {}
 
         return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), terminal_memory
 

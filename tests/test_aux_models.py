@@ -18,7 +18,11 @@ from src.models.sequence.auxiliary import (
 )
 from src.models.sequence.gru_aux import GRUAuxLM
 from src.models.sequence.rmt_aux import RMTAuxLM
-from src.tasks.tasks import AuxLMTask, LMTask
+from src.tasks.tasks import (
+    AuxLMTask,
+    LMTask,
+    auxiliary_gradient_norm_metrics,
+)
 
 
 class AuxiliaryUtilityTest(unittest.TestCase):
@@ -168,6 +172,42 @@ class AuxTaskMetricTest(unittest.TestCase):
         self.assertEqual(metrics["aux_loss"].item(), 2.0)
         self.assertEqual(metrics["lm_loss"].item(), 0.5)
 
+    def test_gradient_norms_separate_forward_and_all_parameters(self):
+        class ToyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.forward_parameter = torch.nn.Parameter(torch.tensor(1.0))
+                self.aux_parameter = torch.nn.Parameter(torch.tensor(2.0))
+
+        model = ToyModel()
+        lm_loss = model.forward_parameter.pow(2)
+        components = {
+            "shared": model.forward_parameter * model.aux_parameter,
+            "aux_only": model.aux_parameter.pow(2),
+        }
+        metrics = auxiliary_gradient_norm_metrics(
+            model,
+            lm_loss,
+            components,
+            aux_weight=0.1,
+        )
+        torch.testing.assert_close(metrics["grad_norm/forward/lm"], torch.tensor(2.0))
+        torch.testing.assert_close(metrics["grad_norm/all/lm"], torch.tensor(2.0))
+        torch.testing.assert_close(
+            metrics["grad_norm/forward/aux/shared"], torch.tensor(0.2)
+        )
+        torch.testing.assert_close(
+            metrics["grad_norm/all/aux/shared"], torch.sqrt(torch.tensor(0.05))
+        )
+        torch.testing.assert_close(
+            metrics["grad_norm/forward/aux/aux_only"], torch.tensor(0.0)
+        )
+        torch.testing.assert_close(
+            metrics["grad_norm/all/aux/aux_only"], torch.tensor(0.4)
+        )
+        self.assertIsNone(model.forward_parameter.grad)
+        self.assertIsNone(model.aux_parameter.grad)
+
 
 class AuxModelTest(unittest.TestCase):
     def setUp(self):
@@ -228,6 +268,20 @@ class AuxModelTest(unittest.TestCase):
                     )
                 )
                 torch.testing.assert_close(output.aux_loss, component_sum)
+                self.assertEqual(
+                    set(model.loss_components),
+                    {
+                        "chunk_ce",
+                        "discrete_ce",
+                        "memory_nll",
+                        "terminal_nll",
+                        "terminal_chunk",
+                        "total",
+                    },
+                )
+                torch.testing.assert_close(
+                    model.loss_components["total"], output.aux_loss
+                )
                 terminal_loss = terminal_gaussian_nll(
                     state, model.metrics["aux/tau"], self.inputs.size(0)
                 ) / self.inputs.size(1)

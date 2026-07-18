@@ -181,11 +181,71 @@ class LMTask(BaseTask):
         return x, y, w
 
 
+def auxiliary_gradient_norm_metrics(
+    model,
+    lm_loss,
+    loss_components,
+    aux_weight,
+):
+    """Measure actual weighted loss gradients without modifying parameter grads."""
+    parameters = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+    if not parameters:
+        return {}
+
+    def gradients(loss):
+        if not isinstance(loss, torch.Tensor) or not loss.requires_grad:
+            return (None,) * len(parameters)
+        return torch.autograd.grad(
+            loss,
+            parameters,
+            retain_graph=True,
+            create_graph=False,
+            allow_unused=True,
+        )
+
+    def norm(values, mask=None):
+        squares = [
+            value.detach().float().pow(2).sum()
+            for index, value in enumerate(values)
+            if value is not None and (mask is None or mask[index])
+        ]
+        if not squares:
+            return lm_loss.detach().new_zeros(())
+        return torch.stack(squares).sum().sqrt()
+
+    lm_gradients = gradients(lm_loss)
+    forward_mask = tuple(value is not None for value in lm_gradients)
+    metrics = {
+        "grad_norm/all/lm": norm(lm_gradients),
+        "grad_norm/forward/lm": norm(lm_gradients, forward_mask),
+    }
+    for name, component in loss_components.items():
+        component_gradients = gradients(aux_weight * component)
+        metrics[f"grad_norm/all/aux/{name}"] = norm(component_gradients)
+        metrics[f"grad_norm/forward/aux/{name}"] = norm(
+            component_gradients, forward_mask
+        )
+    return metrics
+
+
 class AuxLMTask(LMTask):
     """Language modeling task that adds a model-provided inverse auxiliary."""
 
-    def __init__(self, aux_weight=1.0, **kwargs):
+    def __init__(
+        self,
+        aux_weight=1.0,
+        aux_gradient_norm_interval=0,
+        **kwargs,
+    ):
+        if (
+            isinstance(aux_gradient_norm_interval, bool)
+            or not isinstance(aux_gradient_norm_interval, int)
+            or aux_gradient_norm_interval < 0
+        ):
+            raise ValueError("aux_gradient_norm_interval must be a non-negative integer")
         self.aux_weight = aux_weight
+        self.aux_gradient_norm_interval = aux_gradient_norm_interval
+        self._aux_gradient_norm_step = 0
         super().__init__(**kwargs)
         self.lm_loss = self.loss
         self.loss = self._training_loss
@@ -224,6 +284,23 @@ class AuxLMTask(LMTask):
         logits = rearrange(output.logits, '... C -> (...) C')
         targets = rearrange(y, '... -> (...)')
         w["metric_loss"] = self.lm_loss(logits, targets)
+        if compute_aux:
+            should_log_gradient_norms = (
+                self.aux_gradient_norm_interval > 0
+                and self._aux_gradient_norm_step
+                % self.aux_gradient_norm_interval
+                == 0
+            )
+            self._aux_gradient_norm_step += 1
+            if should_log_gradient_norms:
+                w["aux_metrics"].update(
+                    auxiliary_gradient_norm_metrics(
+                        model,
+                        w["metric_loss"],
+                        getattr(model, "loss_components", {}),
+                        self.aux_weight,
+                    )
+                )
         return logits, targets, w
 
     def metrics(

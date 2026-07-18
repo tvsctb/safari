@@ -49,5 +49,7 @@ task:
   _name_: aux_lm
   loss: cross_entropy
   aux_weight: 0.1
+  # 0 disables extra autograd passes; use the number of train batches for once/epoch.
+  aux_gradient_norm_interval: 0
   torchmetrics: ['perplexity']
   metrics: ['accuracy_ignore_index']

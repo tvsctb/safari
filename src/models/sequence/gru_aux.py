@@ -187,6 +187,7 @@ class GRUAuxLM(nn.Module):
                 self.inverse_head.weight.copy_(self.embedding.weight[:vocab_size])
 
         self.metrics = {}
+        self.loss_components = {}
 
     def _lm_logits(self, hidden):
         return F.linear(hidden, self.embedding.weight[:self.vocab_size])
@@ -461,6 +462,14 @@ class GRUAuxLM(nn.Module):
                 + loss_terminal
                 + loss_terminal_chunk
             )
+            self.loss_components = {
+                "chunk_ce": loss_chunk,
+                "discrete_ce": loss_discrete,
+                "memory_nll": loss_memory,
+                "terminal_nll": loss_terminal,
+                "terminal_chunk": loss_terminal_chunk,
+                "total": aux_loss,
+            }
             self.metrics = {
                 "aux/chunk_ce": loss_chunk.detach(),
                 "aux/discrete_ce": loss_discrete.detach(),
@@ -481,6 +490,7 @@ class GRUAuxLM(nn.Module):
                 self.metrics[f"aux/tau/{index}"] = value
         else:
             self.metrics = {}
+            self.loss_components = {}
 
         return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), terminal_memory
 
@@ -495,6 +505,7 @@ class GRUAuxLM(nn.Module):
         terminal_state = None
         aux_loss = input_ids.new_zeros((), dtype=self.embedding.weight.dtype)
         combined_metrics = {}
+        combined_loss_components = {}
         for offset in offsets.unique(sorted=True).tolist():
             indices = torch.nonzero(offsets == offset, as_tuple=False).squeeze(1)
             group_state = None if state is None else state.index_select(1, indices)
@@ -521,7 +532,12 @@ class GRUAuxLM(nn.Module):
                 combined_metrics[name] = combined_metrics.get(
                     name, value.new_zeros(())
                 ) + value * weight
+            for name, value in self.loss_components.items():
+                combined_loss_components[name] = combined_loss_components.get(
+                    name, value.new_zeros(())
+                ) + value * weight
         self.metrics = combined_metrics
+        self.loss_components = combined_loss_components
         return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), terminal_state
 
     def forward(
