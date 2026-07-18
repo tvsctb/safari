@@ -18,6 +18,43 @@ suffix="${RUN_SUFFIX:-v1}"
 output_root="${OUTPUT_ROOT:-/tmp/safari-rmt-mechanism}/wave-${wave}"
 mkdir -p "$output_root"
 
+common_args=(
+  experiment=synthetics/associative_recall/rmt_aux
+  trainer.max_epochs=160
+  +trainer.check_val_every_n_epoch=5
+  +trainer.num_sanity_val_steps=0
+  trainer.log_every_n_steps=50
+  trainer.limit_train_batches=1.0
+  trainer.limit_val_batches=1.0
+  +trainer.precision=32
+  train.seed=0
+  train.test=false
+  loader.num_workers=0
+  model.use_chunk_loss=true
+  model.use_memory_loss=true
+  model.use_terminal_loss=true
+  model.use_terminal_chunk=false
+  model.use_terminal_chunk_loss=false
+  model.learnable_terminal_target=true
+  model.memory_scale_granularity=global
+  model.terminal_scale_granularity=global
+  model.rho=1.0
+  model.tau=10.0
+)
+
+# Compose one maximally enabled condition before allocating parallel workers.
+# This catches Hydra schema mistakes without starting training or creating a W&B Run.
+python -m train --cfg job \
+  "${common_args[@]}" \
+  task.aux_weight=0.1 \
+  model.memory_scale_mode=learned \
+  model.terminal_scale_mode=learned \
+  model.stop_gradient_memory_target=true \
+  model.observation_noise_std=0.1 \
+  model.generation_noise_std=0.0 \
+  wandb.mode=disabled \
+  >"$output_root/preflight-config.yaml"
+
 pids=()
 names=()
 
@@ -40,30 +77,10 @@ launch() {
 
   echo "Launching $name (aux_weight=$aux_weight, noise=$noise, scale=$scale_mode, stop_gradient=$stop_gradient)"
   python -m train \
-    experiment=synthetics/associative_recall/rmt_aux \
-    trainer.max_epochs=160 \
-    trainer.check_val_every_n_epoch=5 \
-    trainer.num_sanity_val_steps=0 \
-    trainer.log_every_n_steps=50 \
-    trainer.limit_train_batches=1.0 \
-    trainer.limit_val_batches=1.0 \
-    trainer.precision=32 \
-    train.seed=0 \
-    train.test=false \
-    loader.num_workers=0 \
+    "${common_args[@]}" \
     task.aux_weight="$aux_weight" \
-    model.use_chunk_loss=true \
-    model.use_memory_loss=true \
-    model.use_terminal_loss=true \
-    model.use_terminal_chunk=false \
-    model.use_terminal_chunk_loss=false \
-    model.learnable_terminal_target=true \
     model.memory_scale_mode="$scale_mode" \
-    model.memory_scale_granularity=global \
     model.terminal_scale_mode="$scale_mode" \
-    model.terminal_scale_granularity=global \
-    model.rho=1.0 \
-    model.tau=10.0 \
     model.stop_gradient_memory_target="$stop_gradient" \
     model.observation_noise_std="$observation_noise" \
     model.generation_noise_std="$generation_noise" \
