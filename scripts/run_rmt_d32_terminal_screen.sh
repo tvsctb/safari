@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Second d32 screen: terminal scale and observation noise after the lambda/rho
-# screen. All conditions use lambda=.03 and rho=10.
+# screen. The two surviving memory-scale candidates both use lambda=.1.
 set -euo pipefail
 
 python -c 'import os; key=os.environ.get("WANDB_API_KEY", ""); assert key and key != "WANDB_API_KEY", "WANDB_API_KEY secret was not injected"'
@@ -28,8 +28,7 @@ common_args=(
   train.test=false
   loader.num_workers=0
   task.aux_gradient_norm_interval=157
-  task.aux_weight=0.03
-  model.rho=10.0
+  task.aux_weight=0.1
   model.use_chunk_loss=true
   model.use_discrete_loss=true
   model.use_memory_loss=true
@@ -47,7 +46,8 @@ common_args=(
 
 python -m train --cfg job \
   "${common_args[@]}" \
-  model.tau=3.0 \
+  model.rho=20.0 \
+  model.tau=2.0 \
   model.observation_noise_std=0.1 \
   wandb.mode=disabled \
   >"$output_root/preflight-config.yaml"
@@ -57,13 +57,15 @@ names=()
 
 launch() {
   local label="$1"
-  local tau="$2"
-  local observation_noise="$3"
+  local rho="$2"
+  local tau="$3"
+  local observation_noise="$4"
   local name="rmt-d32-${label}-s0-${suffix}"
 
-  echo "Launching $name (lambda=.03, rho=10, tau=$tau, observation_noise=$observation_noise)"
+  echo "Launching $name (lambda=.1, rho=$rho, tau=$tau, observation_noise=$observation_noise)"
   python -m train \
     "${common_args[@]}" \
+    model.rho="$rho" \
     model.tau="$tau" \
     model.observation_noise_std="$observation_noise" \
     wandb.mode=online \
@@ -77,11 +79,11 @@ launch() {
   names+=("$name")
 }
 
-launch "tau1p5" 1.5 0.0
-launch "tau2" 2.0 0.0
-launch "tau3" 3.0 0.0
-launch "tau5" 5.0 0.0
-launch "tau3-observation0p1" 3.0 0.1
+launch "rho10-tau1p5" 10.0 1.5 0.0
+launch "rho10-tau2" 10.0 2.0 0.0
+launch "rho10-tau3" 10.0 3.0 0.0
+launch "rho20-tau2" 20.0 2.0 0.0
+launch "rho20-tau2-observation0p1" 20.0 2.0 0.1
 
 status=0
 for index in "${!pids[@]}"; do
