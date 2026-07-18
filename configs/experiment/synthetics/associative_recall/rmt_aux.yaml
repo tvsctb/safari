@@ -7,10 +7,11 @@ dataset:
 
 model:
   _name_: rmt_aux_lm
-  d_model: 64
+  # Match the repository Transformer baseline's width and depth by default.
+  d_model: 32
   n_layer: 2
-  d_inner: 256
-  n_heads: 4
+  d_inner: 128
+  n_heads: 1
   vocab_size: ${dataset.vocab_size}
   # Report options: boundary_reverse | role_reverse | role_forward
   token_scheme: boundary_reverse
