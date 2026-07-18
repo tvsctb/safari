@@ -1,3 +1,4 @@
+import math
 from typing import NamedTuple
 
 import torch
@@ -186,11 +187,49 @@ def gaussian_nll_sum(
     return torch.stack([loss.sum() for loss in losses]).sum() / batch_size
 
 
-def terminal_gaussian_nll(value, scale, batch_size, scale_axis=0):
+def memory_reconstruction_target(value, stop_gradient=False):
+    """Optionally remove the direct reconstruction gradient into its target."""
+    return value.detach() if stop_gradient else value
+
+
+def validate_observation_noise_std(value):
+    """Return a finite, non-negative Gaussian observation-noise scale."""
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("observation_noise_std must be finite and non-negative")
+    return value
+
+
+def validate_generation_noise_std(value):
+    """Return a finite, non-negative memory-generation noise scale."""
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("generation_noise_std must be finite and non-negative")
+    return value
+
+
+def noisy_observation(value, noise_std, training):
+    """Apply training-only Gaussian noise to an inverse-path observation."""
+    if not training or noise_std == 0.0:
+        return value
+    return value + noise_std * torch.randn_like(value)
+
+
+def noisy_generation(value, noise_std, training):
+    """Apply training-only Gaussian noise to a generated successor memory."""
+    if not training or noise_std == 0.0:
+        return value
+    return value + noise_std * torch.randn_like(value)
+
+
+def terminal_gaussian_nll(
+    value, scale, batch_size, scale_axis=0, target=None
+):
     """Evaluate the report's terminal Gaussian term per sequence."""
     state_scale = _broadcast_state_scale(scale, value, scale_axis)
+    residual = value if target is None else value - target
     return (
-        value.float().pow(2) / (2.0 * state_scale.pow(2))
+        residual.float().pow(2) / (2.0 * state_scale.pow(2))
         + torch.log(state_scale)
     ).sum() / batch_size
 

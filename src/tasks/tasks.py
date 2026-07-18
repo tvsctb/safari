@@ -207,28 +207,42 @@ class AuxLMTask(LMTask):
 
         aux_tokens = z.pop("aux_tokens", None)
         x, w = encoder(x, **z)
+        compute_aux = model.training and self.aux_weight != 0.0
         output, state = model(
             x,
             **w,
             state=_state,
             targets=y,
             aux_tokens=aux_tokens,
-            compute_aux=model.training and self.aux_weight != 0.0,
+            compute_aux=compute_aux,
         )
         output, w = decoder(output, state=state, **z)
         w["aux_loss"] = output.aux_loss
+        w["aux_metrics"] = (
+            dict(getattr(model, "metrics", {})) if compute_aux else {}
+        )
         logits = rearrange(output.logits, '... C -> (...) C')
         targets = rearrange(y, '... -> (...)')
         w["metric_loss"] = self.lm_loss(logits, targets)
         return logits, targets, w
 
-    def metrics(self, x, y, aux_loss=None, metric_loss=None, **kwargs):
+    def metrics(
+        self,
+        x,
+        y,
+        aux_loss=None,
+        metric_loss=None,
+        aux_metrics=None,
+        **kwargs,
+    ):
         metrics = super().metrics(x, y, **kwargs)
         metrics["lm_loss"] = (
             self.lm_loss(x, y) if metric_loss is None else metric_loss
         ).detach()
         if aux_loss is not None:
             metrics["aux_loss"] = aux_loss.detach()
+        if aux_metrics:
+            metrics.update(aux_metrics)
         return metrics
 
 class ForecastingTask(BaseTask):

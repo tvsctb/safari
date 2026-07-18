@@ -29,8 +29,10 @@ launch() {
     model.n_heads=1 \
     model.n_layer=2 \
     task.aux_weight="$aux_weight" \
-    model.scale_mode=fixed \
-    model.scale_granularity=global \
+    model.memory_scale_mode=fixed \
+    model.memory_scale_granularity=global \
+    model.terminal_scale_mode=fixed \
+    model.terminal_scale_granularity=global \
     model.rho="$rho" \
     model.tau="$tau" \
     wandb.mode=online \

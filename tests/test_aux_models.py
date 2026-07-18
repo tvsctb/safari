@@ -1,4 +1,6 @@
+import sys
 import unittest
+from unittest import mock
 
 import torch
 import torch.nn.functional as F
@@ -8,11 +10,15 @@ from src.models.sequence.auxiliary import (
     chunk_ranges,
     cross_entropy_sum,
     gaussian_nll_sum,
+    memory_reconstruction_target,
+    noisy_generation,
+    noisy_observation,
     role_inverse_targets,
     terminal_gaussian_nll,
 )
 from src.models.sequence.gru_aux import GRUAuxLM
 from src.models.sequence.rmt_aux import RMTAuxLM
+from src.tasks.tasks import AuxLMTask, LMTask
 
 
 class AuxiliaryUtilityTest(unittest.TestCase):
@@ -97,6 +103,71 @@ class AuxiliaryUtilityTest(unittest.TestCase):
         )
         torch.testing.assert_close(rmt_loss, expected_gru)
 
+    def test_memory_target_stop_gradient(self):
+        target = torch.ones(1, 2, 3, requires_grad=True)
+        estimate = torch.zeros_like(target, requires_grad=True)
+        stopped_target = memory_reconstruction_target(target, stop_gradient=True)
+        self.assertFalse(stopped_target.requires_grad)
+        loss = gaussian_nll_sum(
+            [stopped_target], [estimate], torch.ones(()), estimate, batch_size=2
+        )
+        loss.backward()
+        self.assertIsNone(target.grad)
+        self.assertIsNotNone(estimate.grad)
+        self.assertIs(memory_reconstruction_target(target, False), target)
+
+    def test_observation_noise_is_training_only(self):
+        value = torch.zeros(2, 3)
+        with mock.patch.object(
+            torch,
+            "randn_like",
+            return_value=torch.ones_like(value),
+        ):
+            observed = noisy_observation(value, 0.25, training=True)
+        torch.testing.assert_close(observed, torch.full_like(value, 0.25))
+        self.assertIs(noisy_observation(value, 0.25, training=False), value)
+        self.assertIs(noisy_observation(value, 0.0, training=True), value)
+
+    def test_generation_noise_is_training_only(self):
+        value = torch.zeros(2, 3)
+        with mock.patch.object(
+            torch,
+            "randn_like",
+            return_value=torch.ones_like(value),
+        ):
+            generated = noisy_generation(value, 0.4, training=True)
+        torch.testing.assert_close(generated, torch.full_like(value, 0.4))
+        self.assertIs(noisy_generation(value, 0.4, training=False), value)
+        self.assertIs(noisy_generation(value, 0.0, training=True), value)
+
+    def test_terminal_gaussian_nll_accepts_a_target(self):
+        value = torch.ones(2, 1, 3)
+        target = torch.full((2, 1, 3), 0.5)
+        loss = terminal_gaussian_nll(
+            value, torch.ones(()), batch_size=1, target=target
+        )
+        self.assertEqual(loss.item(), 0.75)
+
+
+class AuxTaskMetricTest(unittest.TestCase):
+    def test_component_metrics_are_forwarded_to_the_logger(self):
+        task = object.__new__(AuxLMTask)
+        task.lm_loss = lambda logits, targets: logits.sum() * 0.0
+        logits = torch.zeros(2, 3)
+        targets = torch.zeros(2, dtype=torch.long)
+        component = torch.tensor(1.25)
+        with mock.patch.object(LMTask, "metrics", return_value={}):
+            metrics = task.metrics(
+                logits,
+                targets,
+                aux_loss=torch.tensor(2.0),
+                metric_loss=torch.tensor(0.5),
+                aux_metrics={"aux/memory_nll": component},
+            )
+        self.assertEqual(metrics["aux/memory_nll"], component)
+        self.assertEqual(metrics["aux_loss"].item(), 2.0)
+        self.assertEqual(metrics["lm_loss"].item(), 0.5)
+
 
 class AuxModelTest(unittest.TestCase):
     def setUp(self):
@@ -112,7 +183,8 @@ class AuxModelTest(unittest.TestCase):
                 vocab_size=20,
                 chunk_size=4,
                 random_chunk_offset=False,
-                scale_mode="learned",
+                memory_scale_mode="learned",
+                terminal_scale_mode="learned",
                 use_direction_embedding=True,
             ),
             RMTAuxLM(
@@ -123,7 +195,8 @@ class AuxModelTest(unittest.TestCase):
                 vocab_size=20,
                 chunk_size=4,
                 num_memory_tokens=2,
-                scale_mode="learned",
+                memory_scale_mode="learned",
+                terminal_scale_mode="learned",
                 use_direction_embedding=True,
             ),
         ]
@@ -172,6 +245,216 @@ class AuxModelTest(unittest.TestCase):
                     model.metrics["aux/terminal_chunk"], terminal_ce
                 )
 
+    def test_experimental_memory_options_apply_to_both_models(self):
+        models_and_modules = [
+            (
+                GRUAuxLM(
+                    d_model=8,
+                    n_layer=2,
+                    vocab_size=20,
+                    chunk_size=4,
+                    random_chunk_offset=False,
+                    tau=10.0,
+                    stop_gradient_memory_target=True,
+                    learnable_terminal_target=True,
+                    observation_noise_std=0.2,
+                    generation_noise_std=0.3,
+                ),
+                "src.models.sequence.gru_aux",
+            ),
+            (
+                RMTAuxLM(
+                    d_model=8,
+                    n_layer=1,
+                    d_inner=16,
+                    n_heads=2,
+                    vocab_size=20,
+                    chunk_size=4,
+                    num_memory_tokens=2,
+                    tau=10.0,
+                    stop_gradient_memory_target=True,
+                    learnable_terminal_target=True,
+                    observation_noise_std=0.2,
+                    generation_noise_std=0.3,
+                ),
+                "src.models.sequence.rmt_aux",
+            ),
+        ]
+        for model, module_name in models_and_modules:
+            with self.subTest(model=type(model).__name__):
+                model_module = sys.modules[module_name]
+                with mock.patch.object(
+                    model_module,
+                    "memory_reconstruction_target",
+                    wraps=memory_reconstruction_target,
+                ) as target_fn, mock.patch.object(
+                    model_module,
+                    "noisy_observation",
+                    wraps=noisy_observation,
+                ) as observation_fn:
+                    with mock.patch.object(
+                        model_module,
+                        "noisy_generation",
+                        wraps=noisy_generation,
+                    ) as generation_fn:
+                        output, _ = model(
+                            self.inputs, targets=self.targets, compute_aux=True
+                        )
+                self.assertTrue(torch.isfinite(output.aux_loss))
+                self.assertGreater(target_fn.call_count, 0)
+                self.assertTrue(
+                    all(call.args[1] is True for call in target_fn.call_args_list)
+                )
+                self.assertGreater(observation_fn.call_count, 0)
+                self.assertTrue(
+                    all(
+                        call.args[1] == 0.2 and call.args[2] is True
+                        for call in observation_fn.call_args_list
+                    )
+                )
+                self.assertGreater(generation_fn.call_count, 0)
+                self.assertTrue(
+                    all(
+                        call.args[1] == 0.3 and call.args[2] is True
+                        for call in generation_fn.call_args_list
+                    )
+                )
+                output.aux_loss.backward()
+                self.assertIsNotNone(model.terminal_target.grad)
+                self.assertGreater(model.terminal_target.grad.norm().item(), 0.0)
+
+    def test_all_auxiliary_losses_can_be_disabled_independently(self):
+        constructors = (
+            lambda **options: GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                random_chunk_offset=False,
+                **options,
+            ),
+            lambda **options: RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                num_memory_tokens=2,
+                **options,
+            ),
+        )
+        for construct in constructors:
+            chunk_off = construct(use_chunk_loss=False)
+            output, _ = chunk_off(
+                self.inputs, targets=self.targets, compute_aux=True
+            )
+            self.assertTrue(torch.isfinite(output.aux_loss))
+            self.assertEqual(chunk_off.metrics["aux/chunk_ce"].item(), 0.0)
+            self.assertNotEqual(chunk_off.metrics["aux/memory_nll"].item(), 0.0)
+
+            memory_off = construct(use_memory_loss=False, use_terminal_loss=True)
+            output, _ = memory_off(
+                self.inputs, targets=self.targets, compute_aux=True
+            )
+            self.assertTrue(torch.isfinite(output.aux_loss))
+            self.assertEqual(memory_off.metrics["aux/memory_nll"].item(), 0.0)
+            self.assertEqual(memory_off.metrics["aux/discrete_ce"].item(), 0.0)
+            self.assertNotEqual(memory_off.metrics["aux/terminal_nll"].item(), 0.0)
+
+            terminal_off = construct(use_memory_loss=True, use_terminal_loss=False)
+            output, _ = terminal_off(
+                self.inputs, targets=self.targets, compute_aux=True
+            )
+            self.assertTrue(torch.isfinite(output.aux_loss))
+            self.assertNotEqual(terminal_off.metrics["aux/memory_nll"].item(), 0.0)
+            self.assertNotEqual(terminal_off.metrics["aux/discrete_ce"].item(), 0.0)
+            self.assertEqual(terminal_off.metrics["aux/terminal_nll"].item(), 0.0)
+
+            terminal_chunk_off = construct(use_terminal_chunk_loss=False)
+            output, _ = terminal_chunk_off(
+                self.inputs, targets=self.targets, compute_aux=True
+            )
+            self.assertTrue(torch.isfinite(output.aux_loss))
+            self.assertEqual(
+                terminal_chunk_off.metrics["aux/terminal_chunk"].item(), 0.0
+            )
+            self.assertNotEqual(
+                terminal_chunk_off.metrics["aux/terminal_nll"].item(), 0.0
+            )
+
+    def test_omitting_terminal_chunk_makes_every_chunk_a_transition(self):
+        models = (
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                chunk_size=4,
+                random_chunk_offset=False,
+                use_terminal_chunk=False,
+            ),
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                chunk_size=4,
+                num_memory_tokens=2,
+                use_terminal_chunk=False,
+            ),
+        )
+        for model in models:
+            with self.subTest(model=type(model).__name__):
+                with mock.patch.object(
+                    model, "_inverse_record", wraps=model._inverse_record
+                ) as inverse_record:
+                    output, terminal_state = model(
+                        self.inputs, targets=self.targets, compute_aux=True
+                    )
+                transition_count = sum(
+                    call.args[0].size(0) for call in inverse_record.call_args_list
+                ) // self.inputs.size(0)
+                self.assertEqual(transition_count, 3)
+                self.assertEqual(model.metrics["aux/terminal_chunk"].item(), 0.0)
+                self.assertEqual(output.logits.shape, (2, 10, 20))
+                if isinstance(model, GRUAuxLM):
+                    _, direct_state = model.gru(model.embedding(self.inputs))
+                    torch.testing.assert_close(terminal_state, direct_state)
+
+    def test_terminal_chunk_can_be_omitted_for_role_schemes(self):
+        for token_scheme in ("role_reverse", "role_forward"):
+            models = (
+                GRUAuxLM(
+                    d_model=8,
+                    n_layer=1,
+                    vocab_size=20,
+                    token_scheme=token_scheme,
+                    random_chunk_offset=False,
+                    use_terminal_chunk=False,
+                ),
+                RMTAuxLM(
+                    d_model=8,
+                    n_layer=1,
+                    d_inner=16,
+                    n_heads=2,
+                    vocab_size=20,
+                    num_memory_tokens=2,
+                    token_scheme=token_scheme,
+                    use_terminal_chunk=False,
+                ),
+            )
+            for model in models:
+                with self.subTest(
+                    model=type(model).__name__, token_scheme=token_scheme
+                ):
+                    output, _ = model(
+                        self.inputs, targets=self.targets, compute_aux=True
+                    )
+                    self.assertEqual(output.logits.shape, (2, 10, 20))
+                    self.assertTrue(torch.isfinite(output.aux_loss))
+                    self.assertEqual(
+                        model.metrics["aux/terminal_chunk"].item(), 0.0
+                    )
+
     def test_eval_accepts_masked_targets_without_aux(self):
         masked_targets = torch.full_like(self.targets, -100)
         for model in self._models():
@@ -219,6 +502,50 @@ class AuxModelTest(unittest.TestCase):
             model.forward_queries.untyped_storage().data_ptr(),
             model.inverse_queries.untyped_storage().data_ptr(),
         )
+
+    def test_rmt_queries_do_not_receive_position_embeddings(self):
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            chunk_size=4,
+            num_memory_tokens=2,
+        )
+        self.assertEqual(model.position_embedding.shape, (7, 8))
+        with torch.no_grad():
+            model.position_embedding.copy_(
+                torch.arange(56, dtype=torch.float32).reshape(7, 8)
+            )
+
+        captured = []
+        handle = model.blocks[0].register_forward_pre_hook(
+            lambda module, args: captured.append(args[0].detach().clone())
+        )
+        try:
+            memory = torch.zeros(1, 2, 8)
+            for token_length in (4, 2):
+                model._transform(
+                    memory,
+                    torch.zeros(1, token_length, 8),
+                    model.forward_queries,
+                    model.blocks,
+                    model.final_norm,
+                )
+        finally:
+            handle.remove()
+
+        for token_length, block_input in zip((4, 2), captured):
+            positioned_length = 2 + token_length
+            torch.testing.assert_close(
+                block_input[:, :positioned_length],
+                model.position_embedding[:positioned_length].unsqueeze(0),
+            )
+            torch.testing.assert_close(
+                block_input[:, positioned_length:],
+                model.forward_queries.unsqueeze(0),
+            )
 
     def test_rmt_terminal_chunk_has_no_memory_queries(self):
         model = RMTAuxLM(
@@ -300,7 +627,8 @@ class AuxModelTest(unittest.TestCase):
         gru = GRUAuxLM(d_model=8, n_layer=1, vocab_size=20)
         self.assertEqual(gru.chunk_size, 4)
         self.assertTrue(gru.random_chunk_offset)
-        self.assertEqual(gru.scale_mode, "fixed")
+        self.assertEqual(gru.memory_scale_mode, "fixed")
+        self.assertEqual(gru.terminal_scale_mode, "fixed")
         self.assertFalse(hasattr(gru, "log_rho"))
         self.assertFalse(hasattr(gru, "log_tau"))
         self.assertIs(gru.gru, gru.inverse_gru)
@@ -316,7 +644,8 @@ class AuxModelTest(unittest.TestCase):
         self.assertEqual(rmt.chunk_size, 4)
         self.assertFalse(hasattr(rmt, "random_chunk_offset"))
         self.assertFalse(hasattr(rmt, "chunk_offset_mode"))
-        self.assertEqual(rmt.scale_mode, "fixed")
+        self.assertEqual(rmt.memory_scale_mode, "fixed")
+        self.assertEqual(rmt.terminal_scale_mode, "fixed")
         self.assertFalse(hasattr(rmt, "log_rho"))
         self.assertFalse(hasattr(rmt, "log_tau"))
         self.assertIs(rmt.blocks, rmt.inverse_blocks)
@@ -457,8 +786,10 @@ class AuxModelTest(unittest.TestCase):
             d_model=8,
             n_layer=2,
             vocab_size=20,
-            scale_mode="fixed",
-            scale_granularity="layerwise",
+            memory_scale_mode="fixed",
+            memory_scale_granularity="layerwise",
+            terminal_scale_mode="fixed",
+            terminal_scale_granularity="layerwise",
             rho=[0.3, 1.0],
             tau=[1.0, 3.0],
             random_chunk_offset=False,
@@ -478,8 +809,10 @@ class AuxModelTest(unittest.TestCase):
             n_heads=2,
             vocab_size=20,
             num_memory_tokens=2,
-            scale_mode="fixed",
-            scale_granularity="slotwise",
+            memory_scale_mode="fixed",
+            memory_scale_granularity="slotwise",
+            terminal_scale_mode="fixed",
+            terminal_scale_granularity="slotwise",
             rho=[0.3, 1.0],
             tau=[1.0, 3.0],
         )
@@ -487,6 +820,54 @@ class AuxModelTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(output.aux_loss))
         self.assertEqual(rmt.metrics["aux/rho/0"].item(), rmt.rho[0].item())
         self.assertEqual(rmt.metrics["aux/tau/1"].item(), rmt.tau[1].item())
+
+    def test_memory_and_terminal_scale_options_are_independent(self):
+        gru = GRUAuxLM(
+            d_model=8,
+            n_layer=2,
+            vocab_size=20,
+            random_chunk_offset=False,
+            memory_scale_mode="learned",
+            memory_scale_granularity="layerwise",
+            rho=[0.3, 1.0],
+            terminal_scale_mode="fixed",
+            terminal_scale_granularity="global",
+            tau=10.0,
+        )
+        self.assertTrue(hasattr(gru, "log_rho"))
+        self.assertFalse(hasattr(gru, "log_tau"))
+        output, _ = gru(self.inputs, targets=self.targets, compute_aux=True)
+        output.aux_loss.backward()
+        self.assertIsNotNone(gru.log_rho.grad)
+
+        rmt = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            num_memory_tokens=2,
+            memory_scale_mode="fixed",
+            memory_scale_granularity="global",
+            rho=1.0,
+            terminal_scale_mode="learned",
+            terminal_scale_granularity="slotwise",
+            tau=[3.0, 10.0],
+        )
+        self.assertFalse(hasattr(rmt, "log_rho"))
+        self.assertTrue(hasattr(rmt, "log_tau"))
+        output, _ = rmt(self.inputs, targets=self.targets, compute_aux=True)
+        output.aux_loss.backward()
+        self.assertIsNotNone(rmt.log_tau.grad)
+
+    def test_combined_scale_options_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "separately"):
+            GRUAuxLM(
+                d_model=8,
+                n_layer=1,
+                vocab_size=20,
+                scale_mode="learned",
+            )
 
     def test_component_level_partial_sharing(self):
         for model in (
@@ -662,7 +1043,7 @@ class AuxModelTest(unittest.TestCase):
                 d_model=8,
                 n_layer=1,
                 vocab_size=20,
-                scale_granularity="state_type",
+                memory_scale_granularity="state_type",
             )
 
     def test_rmt_role_terminal_is_query_free(self):

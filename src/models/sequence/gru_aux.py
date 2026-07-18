@@ -12,11 +12,16 @@ from src.models.sequence.auxiliary import (
     cross_entropy_sum,
     gaussian_nll_sum,
     initialize_scale,
+    memory_reconstruction_target,
+    noisy_generation,
+    noisy_observation,
     normalize_offset_mode,
     normalize_token_scheme,
     resolve_direction_embedding,
     role_inverse_targets,
     terminal_gaussian_nll,
+    validate_generation_noise_std,
+    validate_observation_noise_std,
     validate_scale_configuration,
 )
 
@@ -38,12 +43,25 @@ class GRUAuxLM(nn.Module):
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
-        scale_mode="fixed",
-        scale_granularity="global",
+        memory_scale_mode="fixed",
+        memory_scale_granularity="global",
+        terminal_scale_mode="fixed",
+        terminal_scale_granularity="global",
         rho=1.0,
         tau=1.0,
-        min_scale=1e-4,
-        max_scale=1e4,
+        stop_gradient_memory_target=False,
+        learnable_terminal_target=False,
+        observation_noise_std=0.0,
+        generation_noise_std=0.0,
+        use_terminal_chunk=True,
+        use_chunk_loss=True,
+        use_memory_loss=True,
+        use_terminal_loss=True,
+        use_terminal_chunk_loss=True,
+        memory_min_scale=1e-4,
+        memory_max_scale=1e4,
+        terminal_min_scale=1e-4,
+        terminal_max_scale=1e4,
         **kwargs,
     ):
         super().__init__()
@@ -51,6 +69,17 @@ class GRUAuxLM(nn.Module):
             raise ValueError("chunk_size must be greater than 1")
         if "chunk_offset" in kwargs:
             raise ValueError("chunk_offset is not configurable; fixed offset is always 0")
+        legacy_scale_options = {
+            "scale_mode",
+            "scale_granularity",
+            "min_scale",
+            "max_scale",
+        }.intersection(kwargs)
+        if legacy_scale_options:
+            names = ", ".join(sorted(legacy_scale_options))
+            raise ValueError(
+                f"{names} must be configured separately for memory and terminal losses"
+            )
         self.d_model = d_model
         self.d_output = vocab_size
         self.n_layer = n_layer
@@ -67,17 +96,46 @@ class GRUAuxLM(nn.Module):
             use_direction_embedding,
             self.token_scheme,
         )
-        self.scale_mode = scale_mode
-        self.scale_granularity = scale_granularity
-        self.min_scale = min_scale
-        self.max_scale = max_scale
+        self.memory_scale_mode = memory_scale_mode
+        self.memory_scale_granularity = memory_scale_granularity
+        self.terminal_scale_mode = terminal_scale_mode
+        self.terminal_scale_granularity = terminal_scale_granularity
+        self.stop_gradient_memory_target = stop_gradient_memory_target
+        self.learnable_terminal_target = learnable_terminal_target
+        self.observation_noise_std = validate_observation_noise_std(
+            observation_noise_std
+        )
+        self.generation_noise_std = validate_generation_noise_std(
+            generation_noise_std
+        )
+        self.use_terminal_chunk = use_terminal_chunk
+        self.use_chunk_loss = use_chunk_loss
+        self.use_memory_loss = use_memory_loss
+        self.use_terminal_loss = use_terminal_loss
+        self.use_terminal_chunk_loss = use_terminal_chunk_loss
+        self.memory_min_scale = memory_min_scale
+        self.memory_max_scale = memory_max_scale
+        self.terminal_min_scale = terminal_min_scale
+        self.terminal_max_scale = terminal_max_scale
         self.memory_token_id = vocab_size
         self.inverse_token_id = vocab_size + 1
 
         validate_scale_configuration(
-            scale_mode, scale_granularity, {"global", "layerwise"}
+            memory_scale_mode,
+            memory_scale_granularity,
+            {"global", "layerwise"},
         )
-        scale_size = n_layer if scale_granularity == "layerwise" else 1
+        validate_scale_configuration(
+            terminal_scale_mode,
+            terminal_scale_granularity,
+            {"global", "layerwise"},
+        )
+        memory_scale_size = (
+            n_layer if memory_scale_granularity == "layerwise" else 1
+        )
+        terminal_scale_size = (
+            n_layer if terminal_scale_granularity == "layerwise" else 1
+        )
 
         # Allocate both special tokens so checkpoints stay shape-compatible across schemes.
         self.embedding = nn.Embedding(vocab_size + 2, d_model)
@@ -100,10 +158,25 @@ class GRUAuxLM(nn.Module):
             self.direction_embedding = nn.Parameter(torch.zeros(d_model))
 
         initialize_scale(
-            self, "rho", rho, scale_size, scale_mode, scale_granularity
+            self,
+            "rho",
+            rho,
+            memory_scale_size,
+            memory_scale_mode,
+            memory_scale_granularity,
         )
         initialize_scale(
-            self, "tau", tau, scale_size, scale_mode, scale_granularity
+            self,
+            "tau",
+            tau,
+            terminal_scale_size,
+            terminal_scale_mode,
+            terminal_scale_granularity,
+        )
+        self.terminal_target = (
+            nn.Parameter(torch.zeros(n_layer, 1, d_model))
+            if learnable_terminal_target
+            else None
         )
         nn.init.normal_(self.embedding.weight, std=0.02)
         if self.inverse_embedding is not self.embedding:
@@ -124,8 +197,18 @@ class GRUAuxLM(nn.Module):
         return self.inverse_head(hidden)
 
     def _scale(self, name):
+        if name == "rho":
+            mode = self.memory_scale_mode
+            minimum = self.memory_min_scale
+            maximum = self.memory_max_scale
+        elif name == "tau":
+            mode = self.terminal_scale_mode
+            minimum = self.terminal_min_scale
+            maximum = self.terminal_max_scale
+        else:
+            raise ValueError(f"unknown scale: {name}")
         return configured_scale(
-            self, name, self.scale_mode, self.min_scale, self.max_scale
+            self, name, mode, minimum, maximum
         )
 
     def _offset(self, device, compute_aux, forced_offset):
@@ -167,8 +250,11 @@ class GRUAuxLM(nn.Module):
             )
             inputs.append(self.inverse_embedding(memory_ids))
 
+        observed_states = noisy_observation(
+            initial_states, self.observation_noise_std, self.training
+        )
         inverse_outputs, reconstructed_states = self.inverse_gru(
-            torch.cat(inputs, dim=1), initial_states
+            torch.cat(inputs, dim=1), observed_states
         )
         if self.token_scheme == "boundary_reverse":
             token_logits = self._inverse_logits(inverse_outputs[:, :inverse_length])
@@ -210,26 +296,34 @@ class GRUAuxLM(nn.Module):
         memory_estimates = []
         inverse_records = []
 
-        terminal_start, terminal_end = ranges[-1]
+        transition_ranges = ranges[:-1] if self.use_terminal_chunk else ranges
+        terminal_range = ranges[-1] if self.use_terminal_chunk else None
         if self.token_scheme == "boundary_reverse":
-            for start, end in ranges[:-1]:
+            for start, end in transition_ranges:
                 state_before = hidden
                 outputs, hidden = self.gru(
                     self.embedding(input_ids[:, start:end]), hidden
                 )
                 forward_logits.append(self._lm_logits(outputs))
+                hidden = noisy_generation(
+                    hidden, self.generation_noise_std, self.training
+                )
                 if compute_aux:
                     chunk = token_stream[:, start:end]
                     boundary = input_ids[:, start]
                     inverse_records.append((chunk, boundary, state_before, hidden))
 
             terminal_memory = hidden
-            terminal_outputs, _ = self.gru(
-                self.embedding(input_ids[:, terminal_start:terminal_end]),
-                terminal_memory,
-            )
-            final_chunk_logits = self._lm_logits(terminal_outputs)
-            forward_logits.append(final_chunk_logits)
+            if terminal_range is not None:
+                terminal_start, terminal_end = terminal_range
+                terminal_outputs, _ = self.gru(
+                    self.embedding(input_ids[:, terminal_start:terminal_end]),
+                    terminal_memory,
+                )
+                final_chunk_logits = self._lm_logits(terminal_outputs)
+                forward_logits.append(final_chunk_logits)
+            else:
+                final_chunk_logits = None
         else:
             # The host LM remains globally shifted. Process the token preceding
             # C_0 first to obtain S_0, then advance exactly through each
@@ -240,31 +334,50 @@ class GRUAuxLM(nn.Module):
             )
             forward_logits.append(self._lm_logits(initial_outputs))
             cursor = 1
-            for start, end in ranges[:-1]:
+            for start, end in transition_ranges:
                 state_before = hidden
                 advance_end = end + 1
-                outputs, hidden = self.gru(
-                    self.embedding(input_ids[:, cursor:advance_end]), hidden
+                available_end = min(advance_end, length)
+                if cursor < available_end:
+                    outputs, hidden = self.gru(
+                        self.embedding(input_ids[:, cursor:available_end]),
+                        hidden,
+                    )
+                    forward_logits.append(self._lm_logits(outputs))
+                if advance_end > length and token_stream is not None:
+                    # The final shifted target has no corresponding host-LM input.
+                    # It still completes the last auxiliary transition when C_K
+                    # is omitted.
+                    _, hidden = self.gru(
+                        self.embedding(token_stream[:, end - 1:end]), hidden
+                    )
+                hidden = noisy_generation(
+                    hidden, self.generation_noise_std, self.training
                 )
-                forward_logits.append(self._lm_logits(outputs))
                 if compute_aux:
                     chunk = token_stream[:, start:end]
                     inverse_records.append((chunk, None, state_before, hidden))
                 cursor = advance_end
 
             terminal_memory = hidden
-            if cursor < length:
+            if terminal_range is not None and cursor < length:
                 terminal_outputs, _ = self.gru(
                     self.embedding(input_ids[:, cursor:]), terminal_memory
                 )
                 forward_logits.append(self._lm_logits(terminal_outputs))
 
         logits = torch.cat(forward_logits, dim=1)
-        final_chunk_logits = logits[:, terminal_start:terminal_end]
+        if terminal_range is not None:
+            terminal_start, terminal_end = terminal_range
+            final_chunk_logits = logits[:, terminal_start:terminal_end]
         aux_loss = logits.new_zeros(())
 
         if compute_aux:
-            final_chunk_targets = token_stream[:, terminal_start:terminal_end]
+            final_chunk_targets = (
+                None
+                if terminal_range is None
+                else token_stream[:, terminal_start:terminal_end]
+            )
 
             lengths = sorted({record[0].size(1) for record in inverse_records})
             for inverse_length in lengths:
@@ -291,7 +404,12 @@ class GRUAuxLM(nn.Module):
                 else:
                     chunk_logits.append(inverse_logits)
                     chunk_targets.append(inverse_targets)
-                memory_targets.extend([record[2] for record in records])
+                memory_targets.extend([
+                    memory_reconstruction_target(
+                        record[2], self.stop_gradient_memory_target
+                    )
+                    for record in records
+                ])
                 memory_estimates.extend(
                     reconstructed_states.split(batch_size, dim=1)
                 )
@@ -299,29 +417,43 @@ class GRUAuxLM(nn.Module):
             rho = self._scale("rho")
             tau = self._scale("tau")
             sequence_normalizer = float(length)
-            loss_chunk = cross_entropy_sum(
-                chunk_logits, chunk_targets, logits, batch_size
-            ) / sequence_normalizer
-            loss_discrete = cross_entropy_sum(
-                discrete_logits, discrete_targets, logits, batch_size
-            ) / sequence_normalizer
-            loss_memory = gaussian_nll_sum(
-                memory_targets,
-                memory_estimates,
-                rho,
-                logits,
-                batch_size,
-                scale_axis=0,
-            ) / sequence_normalizer
-            loss_terminal = terminal_gaussian_nll(
-                terminal_memory, tau, batch_size, scale_axis=0
-            ) / sequence_normalizer
-            loss_terminal_chunk = F.cross_entropy(
-                final_chunk_logits.reshape(-1, self.vocab_size),
-                final_chunk_targets.reshape(-1),
-                ignore_index=-100,
-                reduction="sum",
-            ) / (batch_size * sequence_normalizer)
+            loss_chunk = logits.new_zeros(())
+            if self.use_chunk_loss:
+                loss_chunk = cross_entropy_sum(
+                    chunk_logits, chunk_targets, logits, batch_size
+                ) / sequence_normalizer
+            loss_discrete = logits.new_zeros(())
+            if self.use_memory_loss:
+                loss_discrete = cross_entropy_sum(
+                    discrete_logits, discrete_targets, logits, batch_size
+                ) / sequence_normalizer
+            loss_memory = logits.new_zeros(())
+            if self.use_memory_loss:
+                loss_memory = gaussian_nll_sum(
+                    memory_targets,
+                    memory_estimates,
+                    rho,
+                    logits,
+                    batch_size,
+                    scale_axis=0,
+                ) / sequence_normalizer
+            loss_terminal = logits.new_zeros(())
+            if self.use_terminal_loss:
+                loss_terminal = terminal_gaussian_nll(
+                    terminal_memory,
+                    tau,
+                    batch_size,
+                    scale_axis=0,
+                    target=self.terminal_target,
+                ) / sequence_normalizer
+            loss_terminal_chunk = logits.new_zeros(())
+            if terminal_range is not None and self.use_terminal_chunk_loss:
+                loss_terminal_chunk = F.cross_entropy(
+                    final_chunk_logits.reshape(-1, self.vocab_size),
+                    final_chunk_targets.reshape(-1),
+                    ignore_index=-100,
+                    reduction="sum",
+                ) / (batch_size * sequence_normalizer)
             aux_loss = (
                 loss_chunk
                 + loss_discrete

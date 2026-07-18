@@ -12,10 +12,15 @@ from src.models.sequence.auxiliary import (
     cross_entropy_sum,
     gaussian_nll_sum,
     initialize_scale,
+    memory_reconstruction_target,
+    noisy_generation,
+    noisy_observation,
     normalize_token_scheme,
     resolve_direction_embedding,
     role_inverse_targets,
     terminal_gaussian_nll,
+    validate_generation_noise_std,
+    validate_observation_noise_std,
     validate_scale_configuration,
 )
 
@@ -67,12 +72,25 @@ class RMTAuxLM(nn.Module):
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
-        scale_mode="fixed",
-        scale_granularity="global",
+        memory_scale_mode="fixed",
+        memory_scale_granularity="global",
+        terminal_scale_mode="fixed",
+        terminal_scale_granularity="global",
         rho=1.0,
         tau=1.0,
-        min_scale=1e-4,
-        max_scale=1e4,
+        stop_gradient_memory_target=False,
+        learnable_terminal_target=False,
+        observation_noise_std=0.0,
+        generation_noise_std=0.0,
+        use_terminal_chunk=True,
+        use_chunk_loss=True,
+        use_memory_loss=True,
+        use_terminal_loss=True,
+        use_terminal_chunk_loss=True,
+        memory_min_scale=1e-4,
+        memory_max_scale=1e4,
+        terminal_min_scale=1e-4,
+        terminal_max_scale=1e4,
         **kwargs,
     ):
         super().__init__()
@@ -82,6 +100,17 @@ class RMTAuxLM(nn.Module):
             raise ValueError("chunk_offset is not configurable; fixed offset is always 0")
         if "random_chunk_offset" in kwargs:
             raise ValueError("RMT chunk offset is fixed at 0 and is not configurable")
+        legacy_scale_options = {
+            "scale_mode",
+            "scale_granularity",
+            "min_scale",
+            "max_scale",
+        }.intersection(kwargs)
+        if legacy_scale_options:
+            names = ", ".join(sorted(legacy_scale_options))
+            raise ValueError(
+                f"{names} must be configured separately for memory and terminal losses"
+            )
         if num_memory_tokens <= 0:
             raise ValueError("num_memory_tokens must be positive")
         self.d_model = d_model
@@ -97,17 +126,50 @@ class RMTAuxLM(nn.Module):
             use_direction_embedding,
             self.token_scheme,
         )
-        self.scale_mode = scale_mode
-        self.scale_granularity = scale_granularity
-        self.min_scale = min_scale
-        self.max_scale = max_scale
+        self.memory_scale_mode = memory_scale_mode
+        self.memory_scale_granularity = memory_scale_granularity
+        self.terminal_scale_mode = terminal_scale_mode
+        self.terminal_scale_granularity = terminal_scale_granularity
+        self.stop_gradient_memory_target = stop_gradient_memory_target
+        self.learnable_terminal_target = learnable_terminal_target
+        self.observation_noise_std = validate_observation_noise_std(
+            observation_noise_std
+        )
+        self.generation_noise_std = validate_generation_noise_std(
+            generation_noise_std
+        )
+        self.use_terminal_chunk = use_terminal_chunk
+        self.use_chunk_loss = use_chunk_loss
+        self.use_memory_loss = use_memory_loss
+        self.use_terminal_loss = use_terminal_loss
+        self.use_terminal_chunk_loss = use_terminal_chunk_loss
+        self.memory_min_scale = memory_min_scale
+        self.memory_max_scale = memory_max_scale
+        self.terminal_min_scale = terminal_min_scale
+        self.terminal_max_scale = terminal_max_scale
         self.forward_token_id = vocab_size
         self.inverse_token_id = vocab_size + 1
 
         validate_scale_configuration(
-            scale_mode, scale_granularity, {"global", "slotwise"}
+            memory_scale_mode,
+            memory_scale_granularity,
+            {"global", "slotwise"},
         )
-        scale_size = num_memory_tokens if scale_granularity == "slotwise" else 1
+        validate_scale_configuration(
+            terminal_scale_mode,
+            terminal_scale_granularity,
+            {"global", "slotwise"},
+        )
+        memory_scale_size = (
+            num_memory_tokens
+            if memory_scale_granularity == "slotwise"
+            else 1
+        )
+        terminal_scale_size = (
+            num_memory_tokens
+            if terminal_scale_granularity == "slotwise"
+            else 1
+        )
 
         self.embedding = nn.Embedding(vocab_size + 2, d_model)
         self.inverse_embedding = (
@@ -124,13 +186,13 @@ class RMTAuxLM(nn.Module):
 
         max_token_length = chunk_size + 1
         self.position_embedding = nn.Parameter(
-            torch.empty(2 * num_memory_tokens + max_token_length, d_model)
+            torch.empty(num_memory_tokens + max_token_length, d_model)
         )
         self.inverse_position_embedding = (
             None
             if share_inverse
             else nn.Parameter(
-                torch.empty(2 * num_memory_tokens + max_token_length, d_model)
+                torch.empty(num_memory_tokens + max_token_length, d_model)
             )
         )
         self.blocks = nn.ModuleList([
@@ -146,10 +208,25 @@ class RMTAuxLM(nn.Module):
             self.inverse_final_norm = copy.deepcopy(self.final_norm)
 
         initialize_scale(
-            self, "rho", rho, scale_size, scale_mode, scale_granularity
+            self,
+            "rho",
+            rho,
+            memory_scale_size,
+            memory_scale_mode,
+            memory_scale_granularity,
         )
         initialize_scale(
-            self, "tau", tau, scale_size, scale_mode, scale_granularity
+            self,
+            "tau",
+            tau,
+            terminal_scale_size,
+            terminal_scale_mode,
+            terminal_scale_granularity,
+        )
+        self.terminal_target = (
+            nn.Parameter(torch.zeros(num_memory_tokens, d_model))
+            if learnable_terminal_target
+            else None
         )
         self.register_buffer(
             "causal_mask",
@@ -191,8 +268,18 @@ class RMTAuxLM(nn.Module):
         return self.inverse_head(hidden)
 
     def _scale(self, name):
+        if name == "rho":
+            mode = self.memory_scale_mode
+            minimum = self.memory_min_scale
+            maximum = self.memory_max_scale
+        elif name == "tau":
+            mode = self.terminal_scale_mode
+            minimum = self.terminal_min_scale
+            maximum = self.terminal_max_scale
+        else:
+            raise ValueError(f"unknown scale: {name}")
         return configured_scale(
-            self, name, self.scale_mode, self.min_scale, self.max_scale
+            self, name, mode, minimum, maximum
         )
 
     def default_state(self, *batch_shape, device=None):
@@ -214,18 +301,18 @@ class RMTAuxLM(nn.Module):
         token_length = token_embeddings.size(1)
         if token_length > self.chunk_size + 1:
             raise ValueError("RMT token input exceeds the configured scheme length")
-        if queries is None:
-            x = torch.cat((memory, token_embeddings), dim=1)
-        else:
-            query_batch = queries.unsqueeze(0).expand(batch_size, -1, -1)
-            x = torch.cat((memory, token_embeddings, query_batch), dim=1)
-        sequence_length = x.size(1)
         position_embedding = (
             self.position_embedding
             if position_embedding is None
             else position_embedding
         )
-        x = x + position_embedding[:sequence_length]
+        positioned_length = self.num_memory_tokens + token_length
+        x = torch.cat((memory, token_embeddings), dim=1)
+        x = x + position_embedding[:positioned_length]
+        if queries is not None:
+            query_batch = queries.unsqueeze(0).expand(batch_size, -1, -1)
+            x = torch.cat((x, query_batch), dim=1)
+        sequence_length = x.size(1)
         mask = self.causal_mask[:sequence_length, :sequence_length]
         for block in blocks:
             x = block(x, mask)
@@ -277,8 +364,11 @@ class RMTAuxLM(nn.Module):
             inverse_embeddings = self._role_embeddings(
                 data_ids, self.inverse_token_id, self.inverse_embedding
             )
+        observed_memories = noisy_observation(
+            successor_memories, self.observation_noise_std, self.training
+        )
         inverse_hidden, reconstructed_memories = self._transform(
-            successor_memories,
+            observed_memories,
             inverse_embeddings,
             self.inverse_queries,
             self.inverse_blocks,
@@ -320,7 +410,9 @@ class RMTAuxLM(nn.Module):
         memory_estimates = []
         inverse_records = []
 
-        for start, end in ranges[:-1]:
+        transition_ranges = ranges[:-1] if self.use_terminal_chunk else ranges
+        terminal_range = ranges[-1] if self.use_terminal_chunk else None
+        for start, end in transition_ranges:
             memory_before = memory
             token_chunk = None if token_stream is None else token_stream[:, start:end]
             logits, memory = self._forward_chunk(
@@ -330,6 +422,9 @@ class RMTAuxLM(nn.Module):
                 terminal=False,
             )
             forward_logits.append(logits)
+            memory = noisy_generation(
+                memory, self.generation_noise_std, self.training
+            )
             if compute_aux:
                 boundary = (
                     input_ids[:, start]
@@ -341,19 +436,24 @@ class RMTAuxLM(nn.Module):
                 )
 
         terminal_memory = memory
-        terminal_start, terminal_end = ranges[-1]
-        final_chunk_tokens = (
-            None if token_stream is None else token_stream[:, terminal_start:terminal_end]
-        )
-        final_chunk_logits, no_successor_memory = self._forward_chunk(
-            terminal_memory,
-            input_ids[:, terminal_start:terminal_end],
-            final_chunk_tokens,
-            terminal=True,
-        )
-        if no_successor_memory is not None:
-            raise RuntimeError("terminal RMT call must not produce successor memory")
-        forward_logits.append(final_chunk_logits)
+        final_chunk_tokens = None
+        final_chunk_logits = None
+        if terminal_range is not None:
+            terminal_start, terminal_end = terminal_range
+            final_chunk_tokens = (
+                None
+                if token_stream is None
+                else token_stream[:, terminal_start:terminal_end]
+            )
+            final_chunk_logits, no_successor_memory = self._forward_chunk(
+                terminal_memory,
+                input_ids[:, terminal_start:terminal_end],
+                final_chunk_tokens,
+                terminal=True,
+            )
+            if no_successor_memory is not None:
+                raise RuntimeError("terminal RMT call must not produce successor memory")
+            forward_logits.append(final_chunk_logits)
         logits = torch.cat(forward_logits, dim=1)
         aux_loss = logits.new_zeros(())
 
@@ -384,7 +484,12 @@ class RMTAuxLM(nn.Module):
                 else:
                     chunk_logits.append(inverse_logits)
                     chunk_targets.append(inverse_targets)
-                memory_targets.extend([record[2] for record in records])
+                memory_targets.extend([
+                    memory_reconstruction_target(
+                        record[2], self.stop_gradient_memory_target
+                    )
+                    for record in records
+                ])
                 memory_estimates.extend(
                     reconstructed_memories.split(batch_size, dim=0)
                 )
@@ -392,29 +497,43 @@ class RMTAuxLM(nn.Module):
             rho = self._scale("rho")
             tau = self._scale("tau")
             sequence_normalizer = float(length)
-            loss_chunk = cross_entropy_sum(
-                chunk_logits, chunk_targets, logits, batch_size
-            ) / sequence_normalizer
-            loss_discrete = cross_entropy_sum(
-                discrete_logits, discrete_targets, logits, batch_size
-            ) / sequence_normalizer
-            loss_memory = gaussian_nll_sum(
-                memory_targets,
-                memory_estimates,
-                rho,
-                logits,
-                batch_size,
-                scale_axis=1,
-            ) / sequence_normalizer
-            loss_terminal = terminal_gaussian_nll(
-                terminal_memory, tau, batch_size, scale_axis=1
-            ) / sequence_normalizer
-            loss_terminal_chunk = F.cross_entropy(
-                final_chunk_logits.reshape(-1, self.vocab_size),
-                final_chunk_tokens.reshape(-1),
-                ignore_index=-100,
-                reduction="sum",
-            ) / (batch_size * sequence_normalizer)
+            loss_chunk = logits.new_zeros(())
+            if self.use_chunk_loss:
+                loss_chunk = cross_entropy_sum(
+                    chunk_logits, chunk_targets, logits, batch_size
+                ) / sequence_normalizer
+            loss_discrete = logits.new_zeros(())
+            if self.use_memory_loss:
+                loss_discrete = cross_entropy_sum(
+                    discrete_logits, discrete_targets, logits, batch_size
+                ) / sequence_normalizer
+            loss_memory = logits.new_zeros(())
+            if self.use_memory_loss:
+                loss_memory = gaussian_nll_sum(
+                    memory_targets,
+                    memory_estimates,
+                    rho,
+                    logits,
+                    batch_size,
+                    scale_axis=1,
+                ) / sequence_normalizer
+            loss_terminal = logits.new_zeros(())
+            if self.use_terminal_loss:
+                loss_terminal = terminal_gaussian_nll(
+                    terminal_memory,
+                    tau,
+                    batch_size,
+                    scale_axis=1,
+                    target=self.terminal_target,
+                ) / sequence_normalizer
+            loss_terminal_chunk = logits.new_zeros(())
+            if terminal_range is not None and self.use_terminal_chunk_loss:
+                loss_terminal_chunk = F.cross_entropy(
+                    final_chunk_logits.reshape(-1, self.vocab_size),
+                    final_chunk_tokens.reshape(-1),
+                    ignore_index=-100,
+                    reduction="sum",
+                ) / (batch_size * sequence_normalizer)
             aux_loss = (
                 loss_chunk
                 + loss_discrete
