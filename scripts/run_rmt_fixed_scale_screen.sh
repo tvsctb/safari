@@ -8,8 +8,8 @@ set -euo pipefail
 python -c 'import os; key=os.environ.get("WANDB_API_KEY", ""); assert key and key != "WANDB_API_KEY", "WANDB_API_KEY secret was not injected"'
 
 wave="${EXPERIMENT_WAVE:-A}"
-if [[ "$wave" != "A" && "$wave" != "B" && "$wave" != "C" && "$wave" != "D" ]]; then
-  echo "EXPERIMENT_WAVE must be A, B, C, or D" >&2
+if [[ "$wave" != "A" && "$wave" != "B" && "$wave" != "C" && "$wave" != "D" && "$wave" != "E" ]]; then
+  echo "EXPERIMENT_WAVE must be A, B, C, D, or E" >&2
   exit 2
 fi
 
@@ -18,12 +18,13 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 
 group="${WANDB_GROUP:-rmt-fixed-scale-lambda-20260718-v1}"
 suffix="${RUN_SUFFIX:-v1}"
+max_epochs="${MAX_EPOCHS:-100}"
 output_root="${OUTPUT_ROOT:-/tmp/safari-rmt-fixed-scale-screen}/wave-${wave}"
 mkdir -p "$output_root"
 
 common_args=(
   experiment=synthetics/associative_recall/rmt_aux
-  trainer.max_epochs=100
+  trainer.max_epochs="$max_epochs"
   +trainer.check_val_every_n_epoch=5
   +trainer.num_sanity_val_steps=0
   trainer.log_every_n_steps=50
@@ -106,13 +107,20 @@ elif [[ "$wave" == "C" ]]; then
   launch "rho12-lambda0p05" 0.05 12.0
   launch "rho15-lambda0p05" 0.05 15.0
   launch "rho15-lambda0p07" 0.07 15.0
-else
+elif [[ "$wave" == "D" ]]; then
   # Independent seeds for the first screen's two leading combinations.
   launch "rho10-lambda0p03-rep" 0.03 10.0 2
   launch "rho10-lambda0p03-rep" 0.03 10.0 3
   launch "rho15-lambda0p1-rep" 0.1 15.0 1
   launch "rho15-lambda0p1-rep" 0.1 15.0 2
   launch "rho15-lambda0p1-rep" 0.1 15.0 3
+else
+  # Longer confirmation at seed 0 for the leading short-screen candidates.
+  launch "rho10-lambda0p03-long" 0.03 10.0
+  launch "rho10-lambda0p1-long" 0.1 10.0
+  launch "rho12-lambda0p05-long" 0.05 12.0
+  launch "rho15-lambda0p1-long" 0.1 15.0
+  launch "rho20-lambda0p1-long" 0.1 20.0
 fi
 
 status=0
