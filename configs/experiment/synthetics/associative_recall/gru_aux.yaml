@@ -28,6 +28,7 @@ model:
   generation_noise_std: 0.0
   observation_noise_std: 0.0
   use_chunk_loss: true
+  use_discrete_loss: true
   use_memory_loss: true
   memory_scale_mode: fixed
   memory_scale_granularity: global  # global | layerwise

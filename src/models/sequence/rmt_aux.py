@@ -84,6 +84,7 @@ class RMTAuxLM(nn.Module):
         generation_noise_std=0.0,
         use_terminal_chunk=True,
         use_chunk_loss=True,
+        use_discrete_loss=True,
         use_memory_loss=True,
         use_terminal_loss=True,
         use_terminal_chunk_loss=True,
@@ -140,6 +141,7 @@ class RMTAuxLM(nn.Module):
         )
         self.use_terminal_chunk = use_terminal_chunk
         self.use_chunk_loss = use_chunk_loss
+        self.use_discrete_loss = use_discrete_loss
         self.use_memory_loss = use_memory_loss
         self.use_terminal_loss = use_terminal_loss
         self.use_terminal_chunk_loss = use_terminal_chunk_loss
@@ -504,7 +506,7 @@ class RMTAuxLM(nn.Module):
                     chunk_logits, chunk_targets, logits, batch_size
                 ) / sequence_normalizer
             loss_discrete = logits.new_zeros(())
-            if self.use_memory_loss:
+            if self.use_discrete_loss:
                 loss_discrete = cross_entropy_sum(
                     discrete_logits, discrete_targets, logits, batch_size
                 ) / sequence_normalizer

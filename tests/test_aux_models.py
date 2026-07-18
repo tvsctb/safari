@@ -405,14 +405,35 @@ class AuxModelTest(unittest.TestCase):
             self.assertEqual(chunk_off.metrics["aux/chunk_ce"].item(), 0.0)
             self.assertNotEqual(chunk_off.metrics["aux/memory_nll"].item(), 0.0)
 
-            memory_off = construct(use_memory_loss=False, use_terminal_loss=True)
-            output, _ = memory_off(
+            discrete_off = construct(use_discrete_loss=False)
+            output, _ = discrete_off(
                 self.inputs, targets=self.targets, compute_aux=True
             )
             self.assertTrue(torch.isfinite(output.aux_loss))
-            self.assertEqual(memory_off.metrics["aux/memory_nll"].item(), 0.0)
-            self.assertEqual(memory_off.metrics["aux/discrete_ce"].item(), 0.0)
-            self.assertNotEqual(memory_off.metrics["aux/terminal_nll"].item(), 0.0)
+            self.assertEqual(discrete_off.metrics["aux/discrete_ce"].item(), 0.0)
+            self.assertNotEqual(discrete_off.metrics["aux/memory_nll"].item(), 0.0)
+
+            memory_nll_off = construct(
+                use_discrete_loss=True, use_memory_loss=False, use_terminal_loss=True
+            )
+            output, _ = memory_nll_off(
+                self.inputs, targets=self.targets, compute_aux=True
+            )
+            self.assertTrue(torch.isfinite(output.aux_loss))
+            self.assertEqual(memory_nll_off.metrics["aux/memory_nll"].item(), 0.0)
+            self.assertNotEqual(memory_nll_off.metrics["aux/discrete_ce"].item(), 0.0)
+            self.assertNotEqual(memory_nll_off.metrics["aux/terminal_nll"].item(), 0.0)
+
+            memory_block_off = construct(
+                use_discrete_loss=False, use_memory_loss=False, use_terminal_loss=True
+            )
+            output, _ = memory_block_off(
+                self.inputs, targets=self.targets, compute_aux=True
+            )
+            self.assertTrue(torch.isfinite(output.aux_loss))
+            self.assertEqual(memory_block_off.metrics["aux/memory_nll"].item(), 0.0)
+            self.assertEqual(memory_block_off.metrics["aux/discrete_ce"].item(), 0.0)
+            self.assertNotEqual(memory_block_off.metrics["aux/terminal_nll"].item(), 0.0)
 
             terminal_off = construct(use_memory_loss=True, use_terminal_loss=False)
             output, _ = terminal_off(
