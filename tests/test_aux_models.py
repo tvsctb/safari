@@ -239,6 +239,10 @@ class AuxTaskMetricTest(unittest.TestCase):
         )
         self.assertEqual(metrics["grad_cosine/forward/lm_aux/shared"].item(), 1.0)
         self.assertEqual(metrics["grad_cosine/all/lm_aux/aux_only"].item(), 0.0)
+        torch.testing.assert_close(
+            metrics["grad_norm/block/other/lm"], torch.tensor(2.0)
+        )
+        self.assertIn("grad_cosine/all/aux_aux/shared__aux_only", metrics)
 
     def test_auxiliary_weight_schedules(self):
         self.assertEqual(scheduled_aux_weight(1.0, 0.1, "fixed", 50, 10, 20), 1.0)

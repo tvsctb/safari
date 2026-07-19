@@ -153,6 +153,7 @@ class SequenceLightningModule(pl.LightningModule):
 
         # PL has some bugs, so add hooks and make sure they're only called once
         self._has_setup = False
+        self._seed_diagnostic_logged = False
 
         self.setup()  ## Added by KS
 
@@ -422,6 +423,35 @@ class SequenceLightningModule(pl.LightningModule):
         #     )
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
+        if not self._seed_diagnostic_logged:
+            parameters = [
+                parameter.detach().float().reshape(-1)
+                for parameter in self.parameters()
+            ]
+            parameter_sum = torch.stack(
+                [parameter.sum() for parameter in parameters]
+            ).sum()
+            parameter_sq_norm = torch.stack(
+                [parameter.square().sum() for parameter in parameters]
+            ).sum().sqrt()
+            tokens = batch[0].detach().long().reshape(-1)
+            weights = torch.arange(
+                1, tokens.numel() + 1, device=tokens.device, dtype=torch.long
+            )
+            batch_checksum = (tokens * weights).sum()
+            self.log_dict(
+                {
+                    "diagnostic/model_parameter_sum": parameter_sum,
+                    "diagnostic/model_parameter_norm": parameter_sq_norm,
+                    "diagnostic/first_batch_checksum": batch_checksum.float(),
+                },
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                add_dataloader_idx=False,
+                sync_dist=True,
+            )
+            self._seed_diagnostic_logged = True
         loss = self._shared_step(batch, batch_idx, prefix="train")
 
         # Log the loss explicitly so it shows up in WandB
@@ -661,10 +691,19 @@ def create_trainer(config, **kwargs):
 
 
 def train(config):
-    if config.train.seed is not None:
-        pl.seed_everything(config.train.seed, workers=True)
+    model_seed = config.train.get("model_seed", None)
+    if model_seed is None:
+        model_seed = config.train.seed
+    if model_seed is not None:
+        pl.seed_everything(model_seed, workers=True)
     trainer = create_trainer(config)
     model = SequenceLightningModule(config)
+
+    # Re-seed only when explicitly requested. Leaving runtime_seed null keeps
+    # the historical single-seed RNG stream unchanged after initialization.
+    runtime_seed = config.train.get("runtime_seed", None)
+    if runtime_seed is not None:
+        pl.seed_everything(runtime_seed, workers=True)
 
     # Run initial validation epoch (useful for debugging, finetuning)
     if config.train.validate_at_start:

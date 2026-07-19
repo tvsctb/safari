@@ -4,6 +4,8 @@ defaults:
 
 dataset:
   return_aux_tokens: true
+  # Optional independent seed for shuffled training-batch order.
+  loader_seed: null
 
 model:
   _name_: rmt_aux_lm

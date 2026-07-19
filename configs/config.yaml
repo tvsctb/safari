@@ -15,6 +15,12 @@ defaults:
 # Most of these set combinations of options in the PL trainer, add callbacks, or add features to the optimizer
 train:
   seed: 0
+  # Optional diagnostic controls. Null preserves the legacy single-seed path.
+  # model_seed controls parameter initialization; runtime_seed controls
+  # stochastic operations after model construction. Dataset content/order are
+  # controlled separately by dataset.seed and dataset.loader_seed.
+  model_seed: null
+  runtime_seed: null
   # These three options are used by callbacks (checkpoint, monitor) and scheduler
   # Most of them are task dependent and are set by the pipeline
   interval: ??? # Should be specified by scheduler. Also used by LR monitor

@@ -187,6 +187,7 @@ class ICLDataModule(SequenceDataset):
         copy_method: str,
         number_duplicates_per_epoch: int = 0,
         seed: int = 0,
+        loader_seed: int = None,
         batch_size: int = 32,
         split_train_test: bool = False,
         induction_len: int = 1,
@@ -207,6 +208,7 @@ class ICLDataModule(SequenceDataset):
         assert copy_method in ["induction_head", "assoc_recall"]
         self.number_duplicates_per_epoch = number_duplicates_per_epoch
         self.seed = seed
+        self.loader_seed = loader_seed
         self.batch_size = batch_size
         self.split_train_test = split_train_test # let the same copy chars appear in train/test
         self.induction_len = induction_len
@@ -357,12 +359,16 @@ class ICLDataModule(SequenceDataset):
         pin_memory: bool = True,
         **kwargs,
     ) -> DataLoader:
+        generator = None
+        if shuffle and self.loader_seed is not None:
+            generator = torch.Generator().manual_seed(self.loader_seed)
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
             num_workers=num_workers,
             pin_memory=pin_memory,
             shuffle=shuffle,
+            generator=generator,
             persistent_workers=num_workers > 0,
             collate_fn=self._collate_fn,
         )

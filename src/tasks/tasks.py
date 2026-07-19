@@ -188,7 +188,13 @@ def auxiliary_gradient_norm_metrics(
     aux_weight,
 ):
     """Measure actual weighted loss gradients without modifying parameter grads."""
-    parameters = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+    named_parameters = tuple(
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    )
+    parameter_names = tuple(name for name, _ in named_parameters)
+    parameters = tuple(parameter for _, parameter in named_parameters)
     if not parameters:
         return {}
 
@@ -251,22 +257,71 @@ def auxiliary_gradient_norm_metrics(
 
     lm_gradients = gradients(lm_loss)
     forward_mask = tuple(value is not None for value in lm_gradients)
+    block_masks = {}
+    for index, name in enumerate(parameter_names):
+        leaf_name = name.rsplit(".", 1)[-1]
+        if leaf_name in {"rho", "tau", "raw_rho", "raw_tau"}:
+            block = "scale"
+        elif "terminal_target" in name:
+            block = "terminal_target"
+        elif any(
+            token in name
+            for token in ("initial_memory", "forward_queries", "inverse_queries")
+        ):
+            block = "memory_state"
+        elif any(
+            token in name
+            for token in ("embedding", "position_embedding", "direction_embedding")
+        ):
+            block = "embedding"
+        elif any(token in name for token in ("blocks", "final_norm", "gru")):
+            block = "backbone"
+        elif "head" in name:
+            block = "head"
+        else:
+            block = "other"
+        block_masks.setdefault(block, [False] * len(parameters))[index] = True
+    block_masks = {
+        name: tuple(mask)
+        for name, mask in block_masks.items()
+    }
     metrics = {
         "grad_norm/all/lm": norm(lm_gradients),
         "grad_norm/forward/lm": norm(lm_gradients, forward_mask),
     }
+    for block, mask in block_masks.items():
+        metrics[f"grad_norm/block/{block}/lm"] = norm(lm_gradients, mask)
+    component_gradients = {}
     for name, component in loss_components.items():
-        component_gradients = gradients(aux_weight * component)
-        metrics[f"grad_norm/all/aux/{name}"] = norm(component_gradients)
+        values = gradients(aux_weight * component)
+        component_gradients[name] = values
+        metrics[f"grad_norm/all/aux/{name}"] = norm(values)
         metrics[f"grad_norm/forward/aux/{name}"] = norm(
-            component_gradients, forward_mask
+            values, forward_mask
         )
         metrics[f"grad_cosine/all/lm_aux/{name}"] = cosine(
-            lm_gradients, component_gradients
+            lm_gradients, values
         )
         metrics[f"grad_cosine/forward/lm_aux/{name}"] = cosine(
-            lm_gradients, component_gradients, forward_mask
+            lm_gradients, values, forward_mask
         )
+        for block, mask in block_masks.items():
+            metrics[f"grad_norm/block/{block}/aux/{name}"] = norm(values, mask)
+            metrics[f"grad_cosine/block/{block}/lm_aux/{name}"] = cosine(
+                lm_gradients, values, mask
+            )
+    component_names = tuple(component_gradients)
+    for left_index, left_name in enumerate(component_names):
+        for right_name in component_names[left_index + 1:]:
+            pair_name = f"{left_name}__{right_name}"
+            metrics[f"grad_cosine/all/aux_aux/{pair_name}"] = cosine(
+                component_gradients[left_name], component_gradients[right_name]
+            )
+            metrics[f"grad_cosine/forward/aux_aux/{pair_name}"] = cosine(
+                component_gradients[left_name],
+                component_gradients[right_name],
+                forward_mask,
+            )
     return metrics
 
 
