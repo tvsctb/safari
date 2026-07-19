@@ -11,11 +11,13 @@ from src.models.sequence.auxiliary import (
     cross_entropy_sum,
     gaussian_nll_sum,
     mean_batch_variance,
+    mean_reconstruction_mse,
     memory_reconstruction_target,
     noisy_generation,
     noisy_observation,
     role_inverse_targets,
     terminal_gaussian_nll,
+    terminal_reconstruction_mse,
 )
 from src.models.sequence.gru_aux import GRUAuxLM
 from src.models.sequence.rmt_aux import RMTAuxLM
@@ -23,6 +25,7 @@ from src.tasks.tasks import (
     AuxLMTask,
     LMTask,
     auxiliary_gradient_norm_metrics,
+    scheduled_aux_weight,
 )
 
 
@@ -130,6 +133,19 @@ class AuxiliaryUtilityTest(unittest.TestCase):
         singleton = mean_batch_variance([first[:1]], batch_axis=0)
         self.assertEqual(singleton.item(), 0.0)
 
+    def test_raw_reconstruction_metrics_exclude_scale_constants(self):
+        target = torch.tensor([[1.0, 3.0]])
+        estimate = torch.tensor([[0.0, 1.0]])
+        self.assertEqual(
+            mean_reconstruction_mse([target], [estimate], target).item(),
+            2.5,
+        )
+        self.assertEqual(terminal_reconstruction_mse(target).item(), 5.0)
+        self.assertEqual(
+            terminal_reconstruction_mse(target, torch.ones_like(target)).item(),
+            2.0,
+        )
+
     def test_observation_noise_is_training_only(self):
         value = torch.zeros(2, 3)
         with mock.patch.object(
@@ -217,6 +233,21 @@ class AuxTaskMetricTest(unittest.TestCase):
         )
         self.assertIsNone(model.forward_parameter.grad)
         self.assertIsNone(model.aux_parameter.grad)
+        torch.testing.assert_close(
+            metrics["grad_cosine/all/lm_aux/shared"],
+            2.0 / torch.sqrt(torch.tensor(5.0)),
+        )
+        self.assertEqual(metrics["grad_cosine/forward/lm_aux/shared"].item(), 1.0)
+        self.assertEqual(metrics["grad_cosine/all/lm_aux/aux_only"].item(), 0.0)
+
+    def test_auxiliary_weight_schedules(self):
+        self.assertEqual(scheduled_aux_weight(1.0, 0.1, "fixed", 50, 10, 20), 1.0)
+        self.assertEqual(scheduled_aux_weight(1.0, 0.0, "linear", 10, 10, 20), 1.0)
+        self.assertEqual(scheduled_aux_weight(1.0, 0.0, "linear", 15, 10, 20), 0.5)
+        self.assertEqual(scheduled_aux_weight(1.0, 0.0, "cosine", 15, 10, 20), 0.5)
+        self.assertEqual(scheduled_aux_weight(1.0, 0.1, "cosine", 20, 10, 20), 0.1)
+        with self.assertRaisesRegex(ValueError, "fixed, linear, or cosine"):
+            scheduled_aux_weight(1.0, 0.1, "bad", 0, 0, 1)
 
 
 class AuxModelTest(unittest.TestCase):

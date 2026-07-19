@@ -213,6 +213,42 @@ def auxiliary_gradient_norm_metrics(
             return lm_loss.detach().new_zeros(())
         return torch.stack(squares).sum().sqrt()
 
+    def cosine(left, right, mask=None):
+        indices = [
+            index
+            for index in range(len(left))
+            if mask is None or mask[index]
+        ]
+        left_values = [left[index] for index in indices if left[index] is not None]
+        right_values = [right[index] for index in indices if right[index] is not None]
+        pairs = [
+            (left[index], right[index])
+            for index in indices
+            if left[index] is not None and right[index] is not None
+        ]
+        if not left_values or not right_values:
+            return lm_loss.detach().new_zeros(())
+        dot = (
+            torch.stack([
+            left_value.detach().float().mul(right_value.detach().float()).sum()
+            for left_value, right_value in pairs
+            ]).sum()
+            if pairs
+            else lm_loss.detach().new_zeros(())
+        )
+        left_norm = torch.stack([
+            left_value.detach().float().pow(2).sum()
+            for left_value in left_values
+        ]).sum().sqrt()
+        right_norm = torch.stack([
+            right_value.detach().float().pow(2).sum()
+            for right_value in right_values
+        ]).sum().sqrt()
+        denominator = left_norm * right_norm
+        if denominator.item() == 0.0:
+            return dot.new_zeros(())
+        return dot / denominator
+
     lm_gradients = gradients(lm_loss)
     forward_mask = tuple(value is not None for value in lm_gradients)
     metrics = {
@@ -225,7 +261,43 @@ def auxiliary_gradient_norm_metrics(
         metrics[f"grad_norm/forward/aux/{name}"] = norm(
             component_gradients, forward_mask
         )
+        metrics[f"grad_cosine/all/lm_aux/{name}"] = cosine(
+            lm_gradients, component_gradients
+        )
+        metrics[f"grad_cosine/forward/lm_aux/{name}"] = cosine(
+            lm_gradients, component_gradients, forward_mask
+        )
     return metrics
+
+
+def scheduled_aux_weight(initial, final, schedule, step, start_step, end_step):
+    """Evaluate a fixed, linear, or cosine auxiliary-weight schedule."""
+    if schedule not in {"fixed", "linear", "cosine"}:
+        raise ValueError("aux_weight_schedule must be fixed, linear, or cosine")
+    values = (initial, final)
+    if any(isinstance(value, bool) or not math.isfinite(float(value)) or value < 0 for value in values):
+        raise ValueError("auxiliary weights must be finite and non-negative")
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        raise ValueError("auxiliary schedule step must be a non-negative integer")
+    if schedule == "fixed":
+        return float(initial)
+    if (
+        isinstance(start_step, bool)
+        or isinstance(end_step, bool)
+        or not isinstance(start_step, int)
+        or not isinstance(end_step, int)
+        or start_step < 0
+        or end_step <= start_step
+    ):
+        raise ValueError("auxiliary decay steps must satisfy 0 <= start < end")
+    if step <= start_step:
+        return float(initial)
+    if step >= end_step:
+        return float(final)
+    progress = (step - start_step) / (end_step - start_step)
+    if schedule == "cosine":
+        progress = 0.5 * (1.0 - math.cos(math.pi * progress))
+    return float(initial) + (float(final) - float(initial)) * progress
 
 
 class AuxLMTask(LMTask):
@@ -235,6 +307,10 @@ class AuxLMTask(LMTask):
         self,
         aux_weight=1.0,
         aux_gradient_norm_interval=0,
+        aux_weight_schedule="fixed",
+        aux_weight_final=0.1,
+        aux_weight_decay_start_step=0,
+        aux_weight_decay_end_step=1,
         **kwargs,
     ):
         if (
@@ -243,7 +319,21 @@ class AuxLMTask(LMTask):
             or aux_gradient_norm_interval < 0
         ):
             raise ValueError("aux_gradient_norm_interval must be a non-negative integer")
-        self.aux_weight = aux_weight
+        scheduled_aux_weight(
+            aux_weight,
+            aux_weight_final,
+            aux_weight_schedule,
+            0,
+            aux_weight_decay_start_step,
+            aux_weight_decay_end_step,
+        )
+        self.aux_weight = float(aux_weight)
+        self.aux_weight_schedule = aux_weight_schedule
+        self.aux_weight_final = float(aux_weight_final)
+        self.aux_weight_decay_start_step = aux_weight_decay_start_step
+        self.aux_weight_decay_end_step = aux_weight_decay_end_step
+        self._aux_schedule_step = 0
+        self._current_aux_weight = self.aux_weight
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
         self._aux_gradient_norm_step = 0
         super().__init__(**kwargs)
@@ -254,7 +344,7 @@ class AuxLMTask(LMTask):
     def _training_loss(self, logits, targets, aux_loss=None, **kwargs):
         loss = self.lm_loss(logits, targets)
         if aux_loss is not None:
-            loss = loss + self.aux_weight * aux_loss
+            loss = loss + self._current_aux_weight * aux_loss
         return loss
 
     def forward(self, batch, encoder, model, decoder, _state):
@@ -267,7 +357,16 @@ class AuxLMTask(LMTask):
 
         aux_tokens = z.pop("aux_tokens", None)
         x, w = encoder(x, **z)
-        compute_aux = model.training and self.aux_weight != 0.0
+        if model.training:
+            self._current_aux_weight = scheduled_aux_weight(
+                self.aux_weight,
+                self.aux_weight_final,
+                self.aux_weight_schedule,
+                self._aux_schedule_step,
+                self.aux_weight_decay_start_step,
+                self.aux_weight_decay_end_step,
+            )
+        compute_aux = model.training and self._current_aux_weight != 0.0
         output, state = model(
             x,
             **w,
@@ -298,9 +397,13 @@ class AuxLMTask(LMTask):
                         model,
                         w["metric_loss"],
                         getattr(model, "loss_components", {}),
-                        self.aux_weight,
+                        self._current_aux_weight,
                     )
                 )
+            w["aux_metrics"]["aux/weight"] = logits.detach().new_tensor(
+                self._current_aux_weight
+            )
+            self._aux_schedule_step += 1
         return logits, targets, w
 
     def metrics(

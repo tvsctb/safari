@@ -203,6 +203,24 @@ def mean_batch_variance(values, batch_axis):
     return torch.stack(variances).mean()
 
 
+def mean_reconstruction_mse(targets, estimates, reference):
+    """Average raw coordinate MSE without Gaussian NLL scale constants."""
+    if not targets:
+        return reference.new_zeros(())
+    if len(targets) != len(estimates):
+        raise ValueError("targets and estimates must have the same length")
+    return torch.stack([
+        (target.detach().float() - estimate.detach().float()).pow(2).mean()
+        for target, estimate in zip(targets, estimates)
+    ]).mean()
+
+
+def terminal_reconstruction_mse(value, target=None):
+    """Return raw terminal coordinate MSE, independent of terminal scale."""
+    residual = value.detach() if target is None else value.detach() - target.detach()
+    return residual.float().pow(2).mean()
+
+
 def validate_observation_noise_std(value):
     """Return a finite, non-negative Gaussian observation-noise scale."""
     value = float(value)

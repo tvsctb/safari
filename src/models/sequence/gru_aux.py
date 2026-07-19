@@ -13,6 +13,7 @@ from src.models.sequence.auxiliary import (
     gaussian_nll_sum,
     initialize_scale,
     mean_batch_variance,
+    mean_reconstruction_mse,
     memory_reconstruction_target,
     noisy_generation,
     noisy_observation,
@@ -21,6 +22,7 @@ from src.models.sequence.auxiliary import (
     resolve_direction_embedding,
     role_inverse_targets,
     terminal_gaussian_nll,
+    terminal_reconstruction_mse,
     validate_generation_noise_std,
     validate_observation_noise_std,
     validate_scale_configuration,
@@ -478,6 +480,12 @@ class GRUAuxLM(nn.Module):
                 "aux/discrete_ce": loss_discrete.detach(),
                 "aux/memory_nll": loss_memory.detach(),
                 "aux/terminal_nll": loss_terminal.detach(),
+                "aux/memory_reconstruction_mse": mean_reconstruction_mse(
+                    memory_targets, memory_estimates, logits
+                ),
+                "aux/terminal_reconstruction_mse": terminal_reconstruction_mse(
+                    terminal_memory, self.terminal_target
+                ),
                 "aux/terminal_chunk": loss_terminal_chunk.detach(),
                 "aux/total": aux_loss.detach(),
                 "aux/rho_mean": rho.detach().mean(),
