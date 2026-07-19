@@ -1,5 +1,6 @@
 import copy
 import glob
+import fnmatch
 import os
 import random
 import time
@@ -698,6 +699,31 @@ def train(config):
         pl.seed_everything(model_seed, workers=True)
     trainer = create_trainer(config)
     model = SequenceLightningModule(config)
+
+    donor_seed = config.train.get("initialization_donor_seed", None)
+    transplant_patterns = config.train.get("initialization_transplant_patterns", None)
+    if donor_seed is not None and transplant_patterns:
+        pl.seed_everything(donor_seed, workers=True)
+        donor_config = copy.deepcopy(config)
+        donor_config.train.disable_dataset = True
+        donor = SequenceLightningModule(donor_config)
+        donor_parameters = dict(donor.model.named_parameters())
+        copied = []
+        with torch.no_grad():
+            for name, parameter in model.model.named_parameters():
+                if any(fnmatch.fnmatchcase(name, pattern) for pattern in transplant_patterns):
+                    parameter.copy_(donor_parameters[name])
+                    copied.append(name)
+        if not copied:
+            raise ValueError(
+                "initialization_transplant_patterns did not match any parameters"
+            )
+        log.info(
+            "Transplanted initialization from seed %s: %s",
+            donor_seed,
+            ", ".join(copied),
+        )
+        del donor
 
     # Re-seed only when explicitly requested. Leaving runtime_seed null keeps
     # the historical single-seed RNG stream unchanged after initialization.

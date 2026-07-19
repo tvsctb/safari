@@ -21,6 +21,8 @@ train:
   # controlled separately by dataset.seed and dataset.loader_seed.
   model_seed: null
   runtime_seed: null
+  initialization_donor_seed: null
+  initialization_transplant_patterns: null
   # These three options are used by callbacks (checkpoint, monitor) and scheduler
   # Most of them are task dependent and are set by the pipeline
   interval: ??? # Should be specified by scheduler. Also used by LR monitor
