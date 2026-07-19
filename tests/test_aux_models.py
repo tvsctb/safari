@@ -27,9 +27,36 @@ from src.tasks.tasks import (
     auxiliary_gradient_norm_metrics,
     scheduled_aux_weight,
 )
+from src.utils.initialization import transplant_initialization
 
 
 class AuxiliaryUtilityTest(unittest.TestCase):
+    def test_embedding_initialization_transplant_can_select_vocab_rows(self):
+        base = RMTAuxLM(8, 1, 16, 1, 20)
+        donor = RMTAuxLM(8, 1, 16, 1, 20)
+        original_boundary = base.embedding.weight[20:].detach().clone()
+        copied = transplant_initialization(
+            base, donor, ["embedding.weight"], embedding_rows="vocabulary"
+        )
+        self.assertEqual(copied, ["embedding.weight[vocabulary]"])
+        torch.testing.assert_close(
+            base.embedding.weight[:20], donor.embedding.weight[:20]
+        )
+        torch.testing.assert_close(base.embedding.weight[20:], original_boundary)
+
+    def test_embedding_initialization_transplant_can_select_boundary_rows(self):
+        base = RMTAuxLM(8, 1, 16, 1, 20)
+        donor = RMTAuxLM(8, 1, 16, 1, 20)
+        original_vocabulary = base.embedding.weight[:20].detach().clone()
+        copied = transplant_initialization(
+            base, donor, ["embedding.weight"], embedding_rows="boundary"
+        )
+        self.assertEqual(copied, ["embedding.weight[boundary]"])
+        torch.testing.assert_close(base.embedding.weight[:20], original_vocabulary)
+        torch.testing.assert_close(
+            base.embedding.weight[20:], donor.embedding.weight[20:]
+        )
+
     def test_chunk_ranges_with_offset_and_remainder(self):
         self.assertEqual(chunk_ranges(10, 4, 0), [(0, 4), (4, 8), (8, 10)])
         self.assertEqual(chunk_ranges(10, 4, 2), [(0, 2), (2, 6), (6, 10)])

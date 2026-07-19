@@ -23,6 +23,9 @@ train:
   runtime_seed: null
   initialization_donor_seed: null
   initialization_transplant_patterns: null
+  # When embedding.weight is transplanted, optionally restrict the copy to
+  # vocabulary rows [0, vocab_size) or the two boundary/role-token rows.
+  initialization_transplant_embedding_rows: null # [null | all | vocabulary | boundary]
   # These three options are used by callbacks (checkpoint, monitor) and scheduler
   # Most of them are task dependent and are set by the pipeline
   interval: ??? # Should be specified by scheduler. Also used by LR monitor

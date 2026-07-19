@@ -1,6 +1,5 @@
 import copy
 import glob
-import fnmatch
 import os
 import random
 import time
@@ -26,6 +25,7 @@ from src.dataloaders import SequenceDataset  # TODO make registry
 from src.tasks import decoders, encoders, tasks
 from src.utils import registry
 from src.utils.optim_groups import add_optimizer_hooks
+from src.utils.initialization import transplant_initialization
 
 log = src.utils.train.get_logger(__name__)
 
@@ -155,6 +155,7 @@ class SequenceLightningModule(pl.LightningModule):
         # PL has some bugs, so add hooks and make sure they're only called once
         self._has_setup = False
         self._seed_diagnostic_logged = False
+        self._forward_diagnostic_logged = False
 
         self.setup()  ## Added by KS
 
@@ -333,6 +334,41 @@ class SequenceLightningModule(pl.LightningModule):
         self._process_state(batch, batch_idx, train=(prefix == "train"))
         x, y, w = self.forward(batch)
 
+        if (
+            prefix == "train"
+            and not self._forward_diagnostic_logged
+            and torch.is_tensor(x)
+            and x.ndim >= 2
+        ):
+            logits = x.detach().float()
+            probabilities = logits.softmax(dim=-1)
+            entropy = -(
+                probabilities * probabilities.clamp_min(1e-12).log()
+            ).sum(dim=-1)
+            top_two = logits.topk(min(2, logits.size(-1)), dim=-1).values
+            margin = (
+                top_two[..., 0] - top_two[..., 1]
+                if top_two.size(-1) == 2
+                else torch.zeros_like(top_two[..., 0])
+            )
+            self.log_dict(
+                {
+                    "diagnostic/initial_logits_mean": logits.mean(),
+                    "diagnostic/initial_logits_std": logits.std(),
+                    "diagnostic/initial_logits_entropy": entropy.mean(),
+                    "diagnostic/initial_logits_margin": margin.mean(),
+                    "diagnostic/initial_logits_max_probability": (
+                        probabilities.max(dim=-1).values.mean()
+                    ),
+                },
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                add_dataloader_idx=False,
+                sync_dist=True,
+            )
+            self._forward_diagnostic_logged = True
+
         # Loss
         if prefix == 'train':
             loss = self.loss(x, y, **w)
@@ -440,12 +476,61 @@ class SequenceLightningModule(pl.LightningModule):
                 1, tokens.numel() + 1, device=tokens.device, dtype=torch.long
             )
             batch_checksum = (tokens * weights).sum()
+            diagnostic_metrics = {
+                "diagnostic/model_parameter_sum": parameter_sum,
+                "diagnostic/model_parameter_norm": parameter_sq_norm,
+                "diagnostic/first_batch_checksum": batch_checksum.float(),
+            }
+            if hasattr(self.model, "embedding") and hasattr(self.model, "vocab_size"):
+                embedding = self.model.embedding.weight.detach().float()
+                vocabulary = embedding[: self.model.vocab_size]
+                boundary = embedding[self.model.vocab_size :]
+                row_norms = vocabulary.norm(dim=-1)
+                normalized = torch.nn.functional.normalize(vocabulary, dim=-1)
+                pairwise = normalized @ normalized.transpose(0, 1)
+                off_diagonal = ~torch.eye(
+                    pairwise.size(0), dtype=torch.bool, device=pairwise.device
+                )
+                singular_values = torch.linalg.svdvals(vocabulary)
+                singular_distribution = singular_values / singular_values.sum().clamp_min(1e-12)
+                effective_rank = torch.exp(
+                    -(singular_distribution * singular_distribution.clamp_min(1e-12).log()).sum()
+                )
+                diagnostic_metrics.update(
+                    {
+                        "diagnostic/embedding_vocab_norm_mean": row_norms.mean(),
+                        "diagnostic/embedding_vocab_norm_std": row_norms.std(),
+                        "diagnostic/embedding_vocab_norm_min": row_norms.min(),
+                        "diagnostic/embedding_vocab_norm_max": row_norms.max(),
+                        "diagnostic/embedding_vocab_pairwise_abs_cosine_mean": (
+                            pairwise[off_diagonal].abs().mean()
+                        ),
+                        "diagnostic/embedding_vocab_pairwise_abs_cosine_max": (
+                            pairwise[off_diagonal].abs().max()
+                        ),
+                        "diagnostic/embedding_vocab_effective_rank": effective_rank,
+                        "diagnostic/embedding_vocab_condition": (
+                            singular_values.max()
+                            / singular_values.min().clamp_min(1e-12)
+                        ),
+                    }
+                )
+                if boundary.numel() > 0:
+                    boundary_normalized = torch.nn.functional.normalize(boundary, dim=-1)
+                    diagnostic_metrics.update(
+                        {
+                            "diagnostic/embedding_boundary_norm_mean": (
+                                boundary.norm(dim=-1).mean()
+                            ),
+                            "diagnostic/embedding_boundary_vocab_abs_cosine_max": (
+                                (boundary_normalized @ normalized.transpose(0, 1))
+                                .abs()
+                                .max()
+                            ),
+                        }
+                    )
             self.log_dict(
-                {
-                    "diagnostic/model_parameter_sum": parameter_sum,
-                    "diagnostic/model_parameter_norm": parameter_sq_norm,
-                    "diagnostic/first_batch_checksum": batch_checksum.float(),
-                },
+                diagnostic_metrics,
                 on_step=True,
                 on_epoch=False,
                 prog_bar=False,
@@ -702,22 +787,20 @@ def train(config):
 
     donor_seed = config.train.get("initialization_donor_seed", None)
     transplant_patterns = config.train.get("initialization_transplant_patterns", None)
+    embedding_rows = config.train.get(
+        "initialization_transplant_embedding_rows", None
+    )
     if donor_seed is not None and transplant_patterns:
         pl.seed_everything(donor_seed, workers=True)
         donor_config = copy.deepcopy(config)
         donor_config.train.disable_dataset = True
         donor = SequenceLightningModule(donor_config)
-        donor_parameters = dict(donor.model.named_parameters())
-        copied = []
-        with torch.no_grad():
-            for name, parameter in model.model.named_parameters():
-                if any(fnmatch.fnmatchcase(name, pattern) for pattern in transplant_patterns):
-                    parameter.copy_(donor_parameters[name])
-                    copied.append(name)
-        if not copied:
-            raise ValueError(
-                "initialization_transplant_patterns did not match any parameters"
-            )
+        copied = transplant_initialization(
+            model.model,
+            donor.model,
+            transplant_patterns,
+            embedding_rows=embedding_rows,
+        )
         log.info(
             "Transplanted initialization from seed %s: %s",
             donor_seed,
