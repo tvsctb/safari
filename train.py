@@ -332,7 +332,41 @@ class SequenceLightningModule(pl.LightningModule):
     def _shared_step(self, batch, batch_idx, prefix="train"):
 
         self._process_state(batch, batch_idx, train=(prefix == "train"))
-        x, y, w = self.forward(batch)
+        capture_initial_forward = prefix == "train" and not self._forward_diagnostic_logged
+        activation_samples = {}
+        handles = []
+        if capture_initial_forward:
+            def capture(name):
+                def hook(_module, _inputs, output):
+                    value = output[0] if isinstance(output, tuple) else output
+                    if torch.is_tensor(value):
+                        value = value.detach().float()
+                        activation_samples.setdefault(name, []).append(
+                            torch.stack((value.mean(), value.std(), value.norm(dim=-1).mean()))
+                        )
+                return hook
+
+            if hasattr(self.model, "embedding"):
+                handles.append(
+                    self.model.embedding.register_forward_hook(capture("embedding"))
+                )
+            for index, block in enumerate(getattr(self.model, "blocks", [])):
+                handles.append(block.register_forward_hook(capture(f"block{index}")))
+                if hasattr(block, "attention"):
+                    handles.append(
+                        block.attention.register_forward_hook(
+                            capture(f"block{index}_attention")
+                        )
+                    )
+                if hasattr(block, "mlp"):
+                    handles.append(
+                        block.mlp.register_forward_hook(capture(f"block{index}_mlp"))
+                    )
+        try:
+            x, y, w = self.forward(batch)
+        finally:
+            for handle in handles:
+                handle.remove()
 
         if (
             prefix == "train"
@@ -360,6 +394,13 @@ class SequenceLightningModule(pl.LightningModule):
                     "diagnostic/initial_logits_max_probability": (
                         probabilities.max(dim=-1).values.mean()
                     ),
+                    **{
+                        f"diagnostic/initial_activation/{name}/{statistic}": (
+                            torch.stack(samples).mean(dim=0)[index]
+                        )
+                        for name, samples in activation_samples.items()
+                        for index, statistic in enumerate(("mean", "std", "norm"))
+                    },
                 },
                 on_step=True,
                 on_epoch=False,

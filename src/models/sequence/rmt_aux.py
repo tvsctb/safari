@@ -248,6 +248,7 @@ class RMTAuxLM(nn.Module):
         self.reset_parameters()
         self.metrics = {}
         self.loss_components = {}
+        self._initial_aux_diagnostics_pending = True
 
     def reset_parameters(self):
         nn.init.normal_(self.embedding.weight, std=0.02)
@@ -555,6 +556,52 @@ class RMTAuxLM(nn.Module):
                 "terminal_chunk": loss_terminal_chunk,
                 "total": aux_loss,
             }
+            initial_aux_diagnostics = {}
+            if self._initial_aux_diagnostics_pending:
+                for name, records in (
+                    ("chunk", chunk_logits),
+                    ("discrete", discrete_logits),
+                ):
+                    if records:
+                        initial_logits = torch.cat(
+                            [record.reshape(-1, self.vocab_size) for record in records],
+                            dim=0,
+                        ).detach().float()
+                        initial_probabilities = initial_logits.softmax(dim=-1)
+                        initial_entropy = -(
+                            initial_probabilities
+                            * initial_probabilities.clamp_min(1e-12).log()
+                        ).sum(dim=-1)
+                        initial_top_two = initial_logits.topk(2, dim=-1).values
+                        initial_aux_diagnostics.update(
+                            {
+                                f"diagnostic/initial_{name}_logits_std": (
+                                    initial_logits.std()
+                                ),
+                                f"diagnostic/initial_{name}_logits_entropy": (
+                                    initial_entropy.mean()
+                                ),
+                                f"diagnostic/initial_{name}_logits_margin": (
+                                    (initial_top_two[:, 0] - initial_top_two[:, 1]).mean()
+                                ),
+                            }
+                        )
+                if inverse_records:
+                    initial_successor_memories = torch.cat(
+                        [record[3] for record in inverse_records], dim=0
+                    ).detach().float()
+                    initial_aux_diagnostics.update(
+                        {
+                            "diagnostic/initial_successor_memory_std": (
+                                initial_successor_memories.std()
+                            ),
+                            "diagnostic/initial_successor_memory_norm": (
+                                initial_successor_memories.norm(dim=-1).mean()
+                            ),
+                        }
+                    )
+                self._initial_aux_diagnostics_pending = False
+
             self.metrics = {
                 "aux/chunk_ce": loss_chunk.detach(),
                 "aux/discrete_ce": loss_discrete.detach(),
@@ -580,6 +627,7 @@ class RMTAuxLM(nn.Module):
                 "aux/terminal_batch_variance": mean_batch_variance(
                     [terminal_memory], batch_axis=0
                 ),
+                **initial_aux_diagnostics,
             }
             if rho.numel() == 1:
                 self.metrics["aux/rho"] = rho.detach().reshape(())

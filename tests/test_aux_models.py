@@ -1314,6 +1314,22 @@ class AuxModelTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unmasked aux_tokens"):
             model(self.inputs, targets=None, compute_aux=False)
 
+    def test_rmt_logs_initial_inverse_and_memory_diagnostics_once(self):
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            num_memory_tokens=2,
+        )
+        model(self.inputs, targets=self.targets, compute_aux=True)
+        self.assertIn("diagnostic/initial_chunk_logits_entropy", model.metrics)
+        self.assertIn("diagnostic/initial_discrete_logits_margin", model.metrics)
+        self.assertIn("diagnostic/initial_successor_memory_norm", model.metrics)
+        model(self.inputs, targets=self.targets, compute_aux=True)
+        self.assertNotIn("diagnostic/initial_chunk_logits_entropy", model.metrics)
+
     def test_gru_role_state_boundaries_match_aux_chunks(self):
         model = GRUAuxLM(
             d_model=8,
