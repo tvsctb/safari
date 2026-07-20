@@ -21,6 +21,7 @@ model:
   num_memory_tokens: 4
   dropout: 0.0
   share_inverse: true
+  share_inverse_position_embedding: true
   share_inverse_embedding: true
   share_inverse_head: true
   # Boundary-scheme switch; independent of parameter sharing.

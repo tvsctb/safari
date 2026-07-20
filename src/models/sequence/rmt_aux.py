@@ -72,6 +72,7 @@ class RMTAuxLM(nn.Module):
         dropout=0.0,
         token_scheme="boundary_reverse",
         share_inverse=True,
+        share_inverse_position_embedding=None,
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
@@ -124,6 +125,11 @@ class RMTAuxLM(nn.Module):
         self.num_memory_tokens = num_memory_tokens
         self.token_scheme = normalize_token_scheme(token_scheme)
         self.share_inverse = share_inverse
+        self.share_inverse_position_embedding = (
+            share_inverse
+            if share_inverse_position_embedding is None
+            else share_inverse_position_embedding
+        )
         self.share_inverse_embedding = share_inverse_embedding
         self.share_inverse_head = share_inverse_head
         self.use_direction_embedding = resolve_direction_embedding(
@@ -195,7 +201,7 @@ class RMTAuxLM(nn.Module):
         )
         self.inverse_position_embedding = (
             None
-            if share_inverse
+            if self.share_inverse_position_embedding
             else nn.Parameter(
                 torch.empty(num_memory_tokens + max_token_length, d_model)
             )

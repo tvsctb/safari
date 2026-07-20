@@ -860,6 +860,46 @@ class AuxModelTest(unittest.TestCase):
         self.assertIsNotNone(rmt.embedding.weight.grad)
         self.assertIsNotNone(rmt.inverse_position_embedding.grad)
 
+    def test_inverse_position_embedding_can_be_untied_independently(self):
+        rmt = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            share_inverse=True,
+            share_inverse_position_embedding=False,
+            use_direction_embedding=False,
+        )
+        self.assertIs(rmt.blocks, rmt.inverse_blocks)
+        self.assertIs(rmt.final_norm, rmt.inverse_final_norm)
+        self.assertIsNone(rmt.direction_embedding)
+        self.assertIsNotNone(rmt.inverse_position_embedding)
+        torch.testing.assert_close(
+            rmt.inverse_position_embedding, rmt.position_embedding
+        )
+        self.assertNotEqual(
+            rmt.inverse_position_embedding.untyped_storage().data_ptr(),
+            rmt.position_embedding.untyped_storage().data_ptr(),
+        )
+        output, _ = rmt(self.inputs, targets=self.targets, compute_aux=True)
+        output.aux_loss.backward()
+        self.assertIsNotNone(rmt.position_embedding.grad)
+        self.assertIsNotNone(rmt.inverse_position_embedding.grad)
+
+    def test_inverse_blocks_can_be_untied_while_position_is_shared(self):
+        rmt = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            share_inverse=False,
+            share_inverse_position_embedding=True,
+        )
+        self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
+        self.assertIsNone(rmt.inverse_position_embedding)
+
     def test_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
             models = [
