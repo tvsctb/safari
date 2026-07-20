@@ -278,6 +278,7 @@ class AuxTaskMetricTest(unittest.TestCase):
         self.assertEqual(scheduled_aux_weight(1.0, 0.1, "fixed", 50, 10, 20), 1.0)
         self.assertEqual(scheduled_aux_weight(1.0, 0.0, "linear", 10, 10, 20), 1.0)
         self.assertEqual(scheduled_aux_weight(1.0, 0.0, "linear", 15, 10, 20), 0.5)
+        self.assertEqual(scheduled_aux_weight(0.0, 1.0, "linear", 15, 10, 20), 0.5)
         self.assertEqual(scheduled_aux_weight(1.0, 0.0, "cosine", 15, 10, 20), 0.5)
         self.assertEqual(scheduled_aux_weight(1.0, 0.1, "cosine", 20, 10, 20), 0.1)
         with self.assertRaisesRegex(ValueError, "fixed, linear, or cosine"):
