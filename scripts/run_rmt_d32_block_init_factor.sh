@@ -43,7 +43,7 @@ common=(
 
 pids=(); names=()
 for seed in 0 1 2 3 4; do
-  name="rmt-d32-splitpe-sinusoidal-${mode}-nodir-seed${seed}-v1"
+  name="rmt-d32-splitpe-sinusoidal-blockinit-${mode}-nodir-seed${seed}-v1"
   python -m train "${common[@]}" train.model_seed="$seed" \
     callbacks.model_checkpoint.dirpath="$output_root/$name/checkpoints" \
     wandb.name="$name" wandb.id="$name" hydra.run.dir="$output_root/$name" \
