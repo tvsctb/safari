@@ -140,6 +140,7 @@ class RMTAuxLM(nn.Module):
         inverse_position_initialization="copy",
         position_initialization="normal",
         block_initialization="default",
+        embedding_initialization_std=0.02,
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
@@ -218,6 +219,9 @@ class RMTAuxLM(nn.Module):
                 "or orthogonal_residual"
             )
         self.block_initialization = block_initialization
+        if embedding_initialization_std <= 0:
+            raise ValueError("embedding_initialization_std must be positive")
+        self.embedding_initialization_std = embedding_initialization_std
         self.share_inverse_embedding = share_inverse_embedding
         self.share_inverse_head = share_inverse_head
         self.use_direction_embedding = resolve_direction_embedding(
@@ -345,7 +349,9 @@ class RMTAuxLM(nn.Module):
         self._initial_aux_diagnostics_pending = True
 
     def reset_parameters(self):
-        nn.init.normal_(self.embedding.weight, std=0.02)
+        nn.init.normal_(
+            self.embedding.weight, std=self.embedding_initialization_std
+        )
         nn.init.normal_(self.initial_memory, std=0.02)
         nn.init.normal_(self.forward_queries, std=0.02)
         nn.init.normal_(self.inverse_queries, std=0.02)

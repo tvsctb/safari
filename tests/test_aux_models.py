@@ -1024,6 +1024,26 @@ class AuxModelTest(unittest.TestCase):
             singular_values, torch.ones_like(singular_values), atol=1e-5, rtol=1e-5
         )
 
+    def test_embedding_initialization_std_scales_tied_embedding(self):
+        torch.manual_seed(11)
+        base = RMTAuxLM(
+            d_model=8, n_layer=1, d_inner=16, n_heads=2, vocab_size=20,
+            embedding_initialization_std=0.02,
+        )
+        torch.manual_seed(11)
+        scaled = RMTAuxLM(
+            d_model=8, n_layer=1, d_inner=16, n_heads=2, vocab_size=20,
+            embedding_initialization_std=0.04,
+        )
+        torch.testing.assert_close(scaled.embedding.weight, base.embedding.weight * 2)
+
+    def test_embedding_initialization_std_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            RMTAuxLM(
+                d_model=8, n_layer=1, d_inner=16, n_heads=2, vocab_size=20,
+                embedding_initialization_std=0.0,
+            )
+
     def test_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
             models = [
