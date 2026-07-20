@@ -25,6 +25,7 @@ model:
   inverse_position_initialization: copy
   position_initialization: normal
   block_initialization: default
+  block_initialization_seed: null
   embedding_initialization: normal
   embedding_initialization_std: 0.02
   share_inverse_embedding: true

@@ -119,7 +119,7 @@ def initialize_embedding(parameter, mode, std):
         parameter.copy_(values)
 
 
-def initialize_transformer_blocks(blocks, mode):
+def initialize_transformer_blocks(blocks, mode, seed=None):
     if mode == "default":
         return
     if mode not in {"residual_scaled", "orthogonal", "orthogonal_residual"}:
@@ -132,26 +132,38 @@ def initialize_transformer_blocks(blocks, mode):
     output_gain = residual_gain if mode in {
         "residual_scaled", "orthogonal_residual"
     } else 1.0
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(
+            device=blocks[0].attention.in_proj_weight.device
+        )
+        generator.manual_seed(seed)
     with torch.no_grad():
         for block in blocks:
             if use_orthogonal:
                 for projection in block.attention.in_proj_weight.chunk(3, dim=0):
-                    nn.init.orthogonal_(projection)
+                    nn.init.orthogonal_(projection, generator=generator)
             if block.attention.in_proj_bias is not None:
                 block.attention.in_proj_bias.zero_()
             if use_orthogonal:
                 nn.init.orthogonal_(
-                    block.attention.out_proj.weight, gain=output_gain
+                    block.attention.out_proj.weight,
+                    gain=output_gain,
+                    generator=generator,
                 )
             else:
                 block.attention.out_proj.weight.mul_(output_gain)
             if block.attention.out_proj.bias is not None:
                 block.attention.out_proj.bias.zero_()
             if use_orthogonal:
-                nn.init.orthogonal_(block.mlp[0].weight)
+                nn.init.orthogonal_(block.mlp[0].weight, generator=generator)
             block.mlp[0].bias.zero_()
             if use_orthogonal:
-                nn.init.orthogonal_(block.mlp[3].weight, gain=output_gain)
+                nn.init.orthogonal_(
+                    block.mlp[3].weight,
+                    gain=output_gain,
+                    generator=generator,
+                )
             else:
                 block.mlp[3].weight.mul_(output_gain)
             block.mlp[3].bias.zero_()
@@ -176,6 +188,7 @@ class RMTAuxLM(nn.Module):
         inverse_position_initialization="copy",
         position_initialization="normal",
         block_initialization="default",
+        block_initialization_seed=None,
         embedding_initialization="normal",
         embedding_initialization_std=0.02,
         share_inverse_embedding=True,
@@ -256,6 +269,9 @@ class RMTAuxLM(nn.Module):
                 "or orthogonal_residual"
             )
         self.block_initialization = block_initialization
+        if block_initialization_seed is not None and block_initialization_seed < 0:
+            raise ValueError("block_initialization_seed must be non-negative")
+        self.block_initialization_seed = block_initialization_seed
         if embedding_initialization not in {
             "normal",
             "orthogonal_rows",
@@ -407,10 +423,16 @@ class RMTAuxLM(nn.Module):
         initialize_position_embedding(
             self.position_embedding, self.position_initialization
         )
-        initialize_transformer_blocks(self.blocks, self.block_initialization)
+        initialize_transformer_blocks(
+            self.blocks,
+            self.block_initialization,
+            self.block_initialization_seed,
+        )
         if self.inverse_blocks is not self.blocks:
             initialize_transformer_blocks(
-                self.inverse_blocks, self.block_initialization
+                self.inverse_blocks,
+                self.block_initialization,
+                self.block_initialization_seed,
             )
         with torch.no_grad():
             if self.inverse_embedding is not self.embedding:

@@ -1079,6 +1079,29 @@ class AuxModelTest(unittest.TestCase):
                 embedding_initialization="unknown",
             )
 
+    def test_fixed_block_initialization_seed_is_model_seed_independent(self):
+        models = []
+        for model_seed in (0, 1):
+            torch.manual_seed(model_seed)
+            models.append(RMTAuxLM(
+                d_model=32, n_layer=2, d_inner=64, n_heads=2, vocab_size=20,
+                block_initialization="orthogonal_residual",
+                block_initialization_seed=17,
+            ))
+        torch.testing.assert_close(
+            models[0].blocks[0].attention.in_proj_weight,
+            models[1].blocks[0].attention.in_proj_weight,
+        )
+        self.assertFalse(torch.equal(models[0].initial_memory, models[1].initial_memory))
+
+    def test_block_initialization_seed_must_be_non_negative(self):
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            RMTAuxLM(
+                d_model=32, n_layer=1, d_inner=64, n_heads=2, vocab_size=20,
+                block_initialization="orthogonal_residual",
+                block_initialization_seed=-1,
+            )
+
     def test_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
             models = [
