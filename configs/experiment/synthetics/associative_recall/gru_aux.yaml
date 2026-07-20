@@ -56,6 +56,8 @@ task:
   aux_weight_final: 0.1
   aux_weight_decay_start_step: 0
   aux_weight_decay_end_step: 1
+  aux_component_weights: {}
+  aux_component_weights_final: {}
   # 0 disables extra autograd passes; use the number of train batches for once/epoch.
   aux_gradient_norm_interval: 0
   torchmetrics: ['perplexity']

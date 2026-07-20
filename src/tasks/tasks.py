@@ -1,4 +1,5 @@
 from typing import Optional, List, Tuple
+from collections.abc import Mapping
 import math
 import functools
 import collections
@@ -355,6 +356,66 @@ def scheduled_aux_weight(initial, final, schedule, step, start_step, end_step):
     return float(initial) + (float(final) - float(initial)) * progress
 
 
+_AUX_COMPONENT_NAMES = (
+    "chunk_ce",
+    "discrete_ce",
+    "memory_nll",
+    "terminal_nll",
+    "terminal_chunk",
+)
+
+
+def normalize_aux_component_weights(weights, label):
+    """Validate sparse per-component multipliers, defaulting missing entries to one."""
+    if weights is None:
+        weights = {}
+    if not isinstance(weights, Mapping):
+        raise ValueError(f"{label} must be a mapping")
+    unknown = set(weights) - set(_AUX_COMPONENT_NAMES)
+    if unknown:
+        raise ValueError(
+            f"{label} contains unknown components: {', '.join(sorted(unknown))}"
+        )
+    normalized = {}
+    for name in _AUX_COMPONENT_NAMES:
+        value = weights.get(name, 1.0)
+        if isinstance(value, bool) or not math.isfinite(float(value)) or value < 0:
+            raise ValueError(f"{label}.{name} must be finite and non-negative")
+        normalized[name] = float(value)
+    return normalized
+
+
+def scheduled_aux_component_weights(
+    initial,
+    final,
+    schedule,
+    step,
+    start_step,
+    end_step,
+):
+    """Evaluate component multipliers on the task's auxiliary schedule."""
+    return {
+        name: scheduled_aux_weight(
+            initial[name], final[name], schedule, step, start_step, end_step
+        )
+        for name in _AUX_COMPONENT_NAMES
+    }
+
+
+def weighted_aux_components(loss_components, component_weights):
+    """Apply task-level component multipliers and rebuild the exact total."""
+    weighted = {
+        name: loss_components[name] * component_weights[name]
+        for name in _AUX_COMPONENT_NAMES
+        if name in loss_components
+    }
+    if not weighted:
+        return {}, loss_components.get("total")
+    total = sum(weighted.values())
+    weighted["total"] = total
+    return weighted, total
+
+
 class AuxLMTask(LMTask):
     """Language modeling task that adds a model-provided inverse auxiliary."""
 
@@ -366,6 +427,8 @@ class AuxLMTask(LMTask):
         aux_weight_final=0.1,
         aux_weight_decay_start_step=0,
         aux_weight_decay_end_step=1,
+        aux_component_weights=None,
+        aux_component_weights_final=None,
         **kwargs,
     ):
         if (
@@ -387,8 +450,15 @@ class AuxLMTask(LMTask):
         self.aux_weight_final = float(aux_weight_final)
         self.aux_weight_decay_start_step = aux_weight_decay_start_step
         self.aux_weight_decay_end_step = aux_weight_decay_end_step
+        self.aux_component_weights = normalize_aux_component_weights(
+            aux_component_weights, "aux_component_weights"
+        )
+        self.aux_component_weights_final = normalize_aux_component_weights(
+            aux_component_weights_final, "aux_component_weights_final"
+        )
         self._aux_schedule_step = 0
         self._current_aux_weight = self.aux_weight
+        self._current_aux_component_weights = dict(self.aux_component_weights)
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
         self._aux_gradient_norm_step = 0
         super().__init__(**kwargs)
@@ -421,6 +491,14 @@ class AuxLMTask(LMTask):
                 self.aux_weight_decay_start_step,
                 self.aux_weight_decay_end_step,
             )
+            self._current_aux_component_weights = scheduled_aux_component_weights(
+                self.aux_component_weights,
+                self.aux_component_weights_final,
+                self.aux_weight_schedule,
+                self._aux_schedule_step,
+                self.aux_weight_decay_start_step,
+                self.aux_weight_decay_end_step,
+            )
         compute_aux = model.training and self._current_aux_weight != 0.0
         output, state = model(
             x,
@@ -431,7 +509,13 @@ class AuxLMTask(LMTask):
             compute_aux=compute_aux,
         )
         output, w = decoder(output, state=state, **z)
-        w["aux_loss"] = output.aux_loss
+        weighted_components, weighted_aux_loss = weighted_aux_components(
+            getattr(model, "loss_components", {}),
+            self._current_aux_component_weights,
+        )
+        w["aux_loss"] = (
+            output.aux_loss if weighted_aux_loss is None else weighted_aux_loss
+        )
         w["aux_metrics"] = (
             dict(getattr(model, "metrics", {})) if compute_aux else {}
         )
@@ -451,13 +535,20 @@ class AuxLMTask(LMTask):
                     auxiliary_gradient_norm_metrics(
                         model,
                         w["metric_loss"],
-                        getattr(model, "loss_components", {}),
+                        weighted_components,
                         self._current_aux_weight,
                     )
                 )
             w["aux_metrics"]["aux/weight"] = logits.detach().new_tensor(
                 self._current_aux_weight
             )
+            for name, weight in self._current_aux_component_weights.items():
+                w["aux_metrics"][f"aux/component_weight/{name}"] = (
+                    logits.detach().new_tensor(weight)
+                )
+        if model.training:
+            # Advance schedules even when an initial zero overall weight skips
+            # the auxiliary forward pass; otherwise a warm-up from zero stalls.
             self._aux_schedule_step += 1
         return logits, targets, w
 

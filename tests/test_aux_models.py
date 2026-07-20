@@ -25,7 +25,10 @@ from src.tasks.tasks import (
     AuxLMTask,
     LMTask,
     auxiliary_gradient_norm_metrics,
+    normalize_aux_component_weights,
     scheduled_aux_weight,
+    scheduled_aux_component_weights,
+    weighted_aux_components,
 )
 from src.utils.initialization import transplant_initialization
 
@@ -279,6 +282,30 @@ class AuxTaskMetricTest(unittest.TestCase):
         self.assertEqual(scheduled_aux_weight(1.0, 0.1, "cosine", 20, 10, 20), 0.1)
         with self.assertRaisesRegex(ValueError, "fixed, linear, or cosine"):
             scheduled_aux_weight(1.0, 0.1, "bad", 0, 0, 1)
+
+    def test_component_weight_schedule_and_weighted_total(self):
+        initial = normalize_aux_component_weights(
+            {"chunk_ce": 0.2, "discrete_ce": 0.2}, "weights"
+        )
+        final = normalize_aux_component_weights({}, "final")
+        middle = scheduled_aux_component_weights(
+            initial, final, "linear", 5, 0, 10
+        )
+        self.assertAlmostEqual(middle["chunk_ce"], 0.6)
+        self.assertEqual(middle["memory_nll"], 1.0)
+        components = {
+            "chunk_ce": torch.tensor(2.0),
+            "memory_nll": torch.tensor(3.0),
+            "total": torch.tensor(5.0),
+        }
+        weighted, total = weighted_aux_components(components, middle)
+        self.assertAlmostEqual(weighted["chunk_ce"].item(), 1.2)
+        self.assertEqual(weighted["memory_nll"].item(), 3.0)
+        self.assertAlmostEqual(total.item(), 4.2, places=6)
+
+    def test_component_weights_reject_unknown_names(self):
+        with self.assertRaisesRegex(ValueError, "unknown components"):
+            normalize_aux_component_weights({"other": 1.0}, "weights")
 
 
 class AuxModelTest(unittest.TestCase):
