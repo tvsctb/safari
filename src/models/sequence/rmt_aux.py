@@ -83,6 +83,31 @@ def initialize_position_embedding(parameter, mode, std=0.02):
         parameter.copy_(values)
 
 
+def initialize_transformer_blocks(blocks, mode):
+    if mode == "default":
+        return
+    if mode != "orthogonal_residual":
+        raise ValueError(
+            "block_initialization must be default or orthogonal_residual"
+        )
+    residual_gain = 1.0 / math.sqrt(2.0 * len(blocks))
+    with torch.no_grad():
+        for block in blocks:
+            for projection in block.attention.in_proj_weight.chunk(3, dim=0):
+                nn.init.orthogonal_(projection)
+            if block.attention.in_proj_bias is not None:
+                block.attention.in_proj_bias.zero_()
+            nn.init.orthogonal_(
+                block.attention.out_proj.weight, gain=residual_gain
+            )
+            if block.attention.out_proj.bias is not None:
+                block.attention.out_proj.bias.zero_()
+            nn.init.orthogonal_(block.mlp[0].weight)
+            block.mlp[0].bias.zero_()
+            nn.init.orthogonal_(block.mlp[3].weight, gain=residual_gain)
+            block.mlp[3].bias.zero_()
+
+
 class RMTAuxLM(nn.Module):
     """Decoder-only RMT implementing the report's inverse-auxiliary options."""
 
@@ -101,6 +126,7 @@ class RMTAuxLM(nn.Module):
         share_inverse_position_embedding=None,
         inverse_position_initialization="copy",
         position_initialization="normal",
+        block_initialization="default",
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
@@ -168,6 +194,11 @@ class RMTAuxLM(nn.Module):
                 "position_initialization must be normal or sinusoidal"
             )
         self.position_initialization = position_initialization
+        if block_initialization not in {"default", "orthogonal_residual"}:
+            raise ValueError(
+                "block_initialization must be default or orthogonal_residual"
+            )
+        self.block_initialization = block_initialization
         self.share_inverse_embedding = share_inverse_embedding
         self.share_inverse_head = share_inverse_head
         self.use_direction_embedding = resolve_direction_embedding(
@@ -302,6 +333,11 @@ class RMTAuxLM(nn.Module):
         initialize_position_embedding(
             self.position_embedding, self.position_initialization
         )
+        initialize_transformer_blocks(self.blocks, self.block_initialization)
+        if self.inverse_blocks is not self.blocks:
+            initialize_transformer_blocks(
+                self.inverse_blocks, self.block_initialization
+            )
         with torch.no_grad():
             if self.inverse_embedding is not self.embedding:
                 self.inverse_embedding.weight.copy_(self.embedding.weight)

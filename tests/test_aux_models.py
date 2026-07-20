@@ -959,6 +959,39 @@ class AuxModelTest(unittest.TestCase):
                 position_initialization="unknown",
             )
 
+    def test_orthogonal_residual_block_initialization(self):
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=2,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            block_initialization="orthogonal_residual",
+        )
+        expected_residual_norm = 1.0 / (4.0 ** 0.5)
+        for block in model.blocks:
+            for projection in block.attention.in_proj_weight.chunk(3, dim=0):
+                gram = projection.T @ projection
+                torch.testing.assert_close(gram, torch.eye(8), atol=1e-5, rtol=1e-5)
+            singular_values = torch.linalg.svdvals(block.attention.out_proj.weight)
+            torch.testing.assert_close(
+                singular_values,
+                torch.full_like(singular_values, expected_residual_norm),
+                atol=1e-5,
+                rtol=1e-5,
+            )
+
+    def test_block_initialization_rejects_unknown_mode(self):
+        with self.assertRaisesRegex(ValueError, "default or orthogonal_residual"):
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                block_initialization="unknown",
+            )
+
     def test_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
             models = [
