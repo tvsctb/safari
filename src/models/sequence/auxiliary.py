@@ -192,9 +192,23 @@ def memory_reconstruction_target(value, stop_gradient=False):
     return value.detach() if stop_gradient else value
 
 
-def memory_observation(value, stop_gradient=False):
-    """Optionally treat the successor memory as fixed inverse-path conditioning."""
-    return value.detach() if stop_gradient else value
+def validate_memory_observation_gradient_scale(gradient_scale):
+    """Return a finite successor-memory gradient multiplier in [0, 1]."""
+    gradient_scale = float(gradient_scale)
+    if not math.isfinite(gradient_scale) or not 0.0 <= gradient_scale <= 1.0:
+        raise ValueError("memory observation gradient scale must be in [0, 1]")
+    return gradient_scale
+
+
+def memory_observation(value, stop_gradient=False, gradient_scale=1.0):
+    """Control inverse-loss gradients entering the successor memory value."""
+    gradient_scale = validate_memory_observation_gradient_scale(gradient_scale)
+    if stop_gradient:
+        gradient_scale = 0.0
+    detached = value.detach()
+    if gradient_scale == 0.0:
+        return detached
+    return detached + gradient_scale * (value - detached)
 
 
 def mean_batch_variance(values, batch_axis):

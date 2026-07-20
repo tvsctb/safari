@@ -215,6 +215,15 @@ class AuxiliaryUtilityTest(unittest.TestCase):
         torch.testing.assert_close(observed, value)
         self.assertFalse(observed.requires_grad)
 
+    def test_memory_observation_scales_only_the_gradient(self):
+        value = torch.randn(2, 3, requires_grad=True)
+        observed = memory_observation(value, gradient_scale=0.25)
+        torch.testing.assert_close(observed, value)
+        observed.sum().backward()
+        torch.testing.assert_close(value.grad, torch.full_like(value, 0.25))
+        with self.assertRaisesRegex(ValueError, "in \\[0, 1\\]"):
+            memory_observation(value, gradient_scale=1.1)
+
 
 class AuxTaskMetricTest(unittest.TestCase):
     def test_component_metrics_are_forwarded_to_the_logger(self):
@@ -427,6 +436,7 @@ class AuxModelTest(unittest.TestCase):
                     tau=10.0,
                     stop_gradient_memory_target=True,
                     stop_gradient_memory_observation=True,
+                    memory_observation_gradient_scale=0.5,
                     learnable_terminal_target=True,
                     observation_noise_std=0.2,
                     generation_noise_std=0.3,
@@ -445,6 +455,7 @@ class AuxModelTest(unittest.TestCase):
                     tau=10.0,
                     stop_gradient_memory_target=True,
                     stop_gradient_memory_observation=True,
+                    memory_observation_gradient_scale=0.5,
                     learnable_terminal_target=True,
                     observation_noise_std=0.2,
                     generation_noise_std=0.3,
@@ -486,6 +497,7 @@ class AuxModelTest(unittest.TestCase):
                 self.assertTrue(
                     all(
                         call.args[1] is True
+                        and call.args[2] == 0.5
                         for call in memory_observation_fn.call_args_list
                     )
                 )

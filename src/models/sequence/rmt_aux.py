@@ -24,6 +24,7 @@ from src.models.sequence.auxiliary import (
     role_inverse_targets,
     terminal_gaussian_nll,
     terminal_reconstruction_mse,
+    validate_memory_observation_gradient_scale,
     validate_generation_noise_std,
     validate_observation_noise_std,
     validate_scale_configuration,
@@ -203,6 +204,7 @@ class RMTAuxLM(nn.Module):
         tau=1.0,
         stop_gradient_memory_target=False,
         stop_gradient_memory_observation=False,
+        memory_observation_gradient_scale=1.0,
         learnable_terminal_target=False,
         observation_noise_std=0.0,
         generation_noise_std=0.0,
@@ -299,6 +301,9 @@ class RMTAuxLM(nn.Module):
         self.terminal_scale_granularity = terminal_scale_granularity
         self.stop_gradient_memory_target = stop_gradient_memory_target
         self.stop_gradient_memory_observation = stop_gradient_memory_observation
+        self.memory_observation_gradient_scale = validate_memory_observation_gradient_scale(
+            memory_observation_gradient_scale
+        )
         self.learnable_terminal_target = learnable_terminal_target
         self.observation_noise_std = validate_observation_noise_std(
             observation_noise_std
@@ -557,7 +562,9 @@ class RMTAuxLM(nn.Module):
             )
         observed_memories = noisy_observation(
             memory_observation(
-                successor_memories, self.stop_gradient_memory_observation
+                successor_memories,
+                self.stop_gradient_memory_observation,
+                self.memory_observation_gradient_scale,
             ),
             self.observation_noise_std,
             self.training,

@@ -39,6 +39,7 @@ model:
   memory_max_scale: 1e4
   stop_gradient_memory_target: false
   stop_gradient_memory_observation: false
+  memory_observation_gradient_scale: 1.0
   use_terminal_loss: true
   terminal_scale_mode: fixed
   terminal_scale_granularity: global  # global | layerwise
