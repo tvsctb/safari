@@ -73,6 +73,7 @@ class RMTAuxLM(nn.Module):
         token_scheme="boundary_reverse",
         share_inverse=True,
         share_inverse_position_embedding=None,
+        inverse_position_initialization="copy",
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
@@ -130,6 +131,11 @@ class RMTAuxLM(nn.Module):
             if share_inverse_position_embedding is None
             else share_inverse_position_embedding
         )
+        if inverse_position_initialization not in {"copy", "independent"}:
+            raise ValueError(
+                "inverse_position_initialization must be copy or independent"
+            )
+        self.inverse_position_initialization = inverse_position_initialization
         self.share_inverse_embedding = share_inverse_embedding
         self.share_inverse_head = share_inverse_head
         self.use_direction_embedding = resolve_direction_embedding(
@@ -270,7 +276,10 @@ class RMTAuxLM(nn.Module):
                     self.embedding.weight[:self.vocab_size]
                 )
             if self.inverse_position_embedding is not None:
-                self.inverse_position_embedding.copy_(self.position_embedding)
+                if self.inverse_position_initialization == "copy":
+                    self.inverse_position_embedding.copy_(self.position_embedding)
+                else:
+                    nn.init.normal_(self.inverse_position_embedding, std=0.02)
 
     def _lm_logits(self, hidden):
         return F.linear(hidden, self.embedding.weight[:self.vocab_size])

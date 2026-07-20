@@ -900,6 +900,37 @@ class AuxModelTest(unittest.TestCase):
         self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
         self.assertIsNone(rmt.inverse_position_embedding)
 
+    def test_inverse_position_embedding_can_initialize_independently(self):
+        torch.manual_seed(0)
+        rmt = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            share_inverse_position_embedding=False,
+            inverse_position_initialization="independent",
+            use_direction_embedding=False,
+        )
+        self.assertIsNotNone(rmt.inverse_position_embedding)
+        self.assertFalse(
+            torch.equal(rmt.inverse_position_embedding, rmt.position_embedding)
+        )
+        self.assertAlmostEqual(
+            rmt.inverse_position_embedding.std().item(), 0.02, delta=0.01
+        )
+
+    def test_inverse_position_initialization_rejects_unknown_mode(self):
+        with self.assertRaisesRegex(ValueError, "copy or independent"):
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                inverse_position_initialization="unknown",
+            )
+
     def test_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
             models = [
