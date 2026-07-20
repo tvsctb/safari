@@ -192,6 +192,11 @@ def memory_reconstruction_target(value, stop_gradient=False):
     return value.detach() if stop_gradient else value
 
 
+def memory_observation(value, stop_gradient=False):
+    """Optionally treat the successor memory as fixed inverse-path conditioning."""
+    return value.detach() if stop_gradient else value
+
+
 def mean_batch_variance(values, batch_axis):
     """Average coordinate-wise population variance across the minibatch."""
     if not values:

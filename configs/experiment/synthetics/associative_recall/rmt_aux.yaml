@@ -45,6 +45,7 @@ model:
   memory_min_scale: 1e-4
   memory_max_scale: 1e4
   stop_gradient_memory_target: false
+  stop_gradient_memory_observation: false
   use_terminal_loss: true
   terminal_scale_mode: fixed
   terminal_scale_granularity: global  # global | slotwise

@@ -12,6 +12,7 @@ from src.models.sequence.auxiliary import (
     gaussian_nll_sum,
     mean_batch_variance,
     mean_reconstruction_mse,
+    memory_observation,
     memory_reconstruction_target,
     noisy_generation,
     noisy_observation,
@@ -207,6 +208,12 @@ class AuxiliaryUtilityTest(unittest.TestCase):
             value, torch.ones(()), batch_size=1, target=target
         )
         self.assertEqual(loss.item(), 0.75)
+
+    def test_memory_observation_stop_gradient_preserves_value(self):
+        value = torch.randn(2, 3, requires_grad=True)
+        observed = memory_observation(value, stop_gradient=True)
+        torch.testing.assert_close(observed, value)
+        self.assertFalse(observed.requires_grad)
 
 
 class AuxTaskMetricTest(unittest.TestCase):
@@ -419,6 +426,7 @@ class AuxModelTest(unittest.TestCase):
                     random_chunk_offset=False,
                     tau=10.0,
                     stop_gradient_memory_target=True,
+                    stop_gradient_memory_observation=True,
                     learnable_terminal_target=True,
                     observation_noise_std=0.2,
                     generation_noise_std=0.3,
@@ -436,6 +444,7 @@ class AuxModelTest(unittest.TestCase):
                     num_memory_tokens=2,
                     tau=10.0,
                     stop_gradient_memory_target=True,
+                    stop_gradient_memory_observation=True,
                     learnable_terminal_target=True,
                     observation_noise_std=0.2,
                     generation_noise_std=0.3,
@@ -451,6 +460,10 @@ class AuxModelTest(unittest.TestCase):
                     "memory_reconstruction_target",
                     wraps=memory_reconstruction_target,
                 ) as target_fn, mock.patch.object(
+                    model_module,
+                    "memory_observation",
+                    wraps=memory_observation,
+                ) as memory_observation_fn, mock.patch.object(
                     model_module,
                     "noisy_observation",
                     wraps=noisy_observation,
@@ -469,6 +482,13 @@ class AuxModelTest(unittest.TestCase):
                     all(call.args[1] is True for call in target_fn.call_args_list)
                 )
                 self.assertGreater(observation_fn.call_count, 0)
+                self.assertGreater(memory_observation_fn.call_count, 0)
+                self.assertTrue(
+                    all(
+                        call.args[1] is True
+                        for call in memory_observation_fn.call_args_list
+                    )
+                )
                 self.assertTrue(
                     all(
                         call.args[1] == 0.2 and call.args[2] is True

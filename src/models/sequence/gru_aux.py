@@ -14,6 +14,7 @@ from src.models.sequence.auxiliary import (
     initialize_scale,
     mean_batch_variance,
     mean_reconstruction_mse,
+    memory_observation,
     memory_reconstruction_target,
     noisy_generation,
     noisy_observation,
@@ -53,6 +54,7 @@ class GRUAuxLM(nn.Module):
         rho=1.0,
         tau=1.0,
         stop_gradient_memory_target=False,
+        stop_gradient_memory_observation=False,
         learnable_terminal_target=False,
         observation_noise_std=0.0,
         generation_noise_std=0.0,
@@ -105,6 +107,7 @@ class GRUAuxLM(nn.Module):
         self.terminal_scale_mode = terminal_scale_mode
         self.terminal_scale_granularity = terminal_scale_granularity
         self.stop_gradient_memory_target = stop_gradient_memory_target
+        self.stop_gradient_memory_observation = stop_gradient_memory_observation
         self.learnable_terminal_target = learnable_terminal_target
         self.observation_noise_std = validate_observation_noise_std(
             observation_noise_std
@@ -257,7 +260,11 @@ class GRUAuxLM(nn.Module):
             inputs.append(self.inverse_embedding(memory_ids))
 
         observed_states = noisy_observation(
-            initial_states, self.observation_noise_std, self.training
+            memory_observation(
+                initial_states, self.stop_gradient_memory_observation
+            ),
+            self.observation_noise_std,
+            self.training,
         )
         inverse_outputs, reconstructed_states = self.inverse_gru(
             torch.cat(inputs, dim=1), observed_states
