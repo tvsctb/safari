@@ -1044,6 +1044,41 @@ class AuxModelTest(unittest.TestCase):
                 embedding_initialization_std=0.0,
             )
 
+    def test_embedding_geometry_modes_preserve_other_initialization(self):
+        models = []
+        for mode in (
+            "normal",
+            "orthogonal_rows",
+            "deterministic_orthogonal_rows",
+        ):
+            torch.manual_seed(13)
+            models.append(RMTAuxLM(
+                d_model=32, n_layer=1, d_inner=64, n_heads=2, vocab_size=20,
+                embedding_initialization=mode,
+                embedding_initialization_std=0.04,
+            ))
+        for model in models[1:]:
+            torch.testing.assert_close(model.initial_memory, models[0].initial_memory)
+            torch.testing.assert_close(
+                model.blocks[0].attention.in_proj_weight,
+                models[0].blocks[0].attention.in_proj_weight,
+            )
+            gram = model.embedding.weight @ model.embedding.weight.T
+            diagonal = torch.diag(gram)
+            off_diagonal = gram - torch.diag_embed(diagonal)
+            self.assertLess(off_diagonal.abs().max().item(), 1e-5)
+            torch.testing.assert_close(
+                diagonal, diagonal.mean().expand_as(diagonal),
+                atol=1e-5, rtol=1e-5,
+            )
+
+    def test_embedding_initialization_rejects_unknown_mode(self):
+        with self.assertRaisesRegex(ValueError, "normal, orthogonal_rows"):
+            RMTAuxLM(
+                d_model=32, n_layer=1, d_inner=64, n_heads=2, vocab_size=20,
+                embedding_initialization="unknown",
+            )
+
     def test_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
             models = [

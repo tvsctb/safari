@@ -83,6 +83,42 @@ def initialize_position_embedding(parameter, mode, std=0.02):
         parameter.copy_(values)
 
 
+def initialize_embedding(parameter, mode, std):
+    reference = torch.empty_like(parameter)
+    nn.init.normal_(reference, std=std)
+    if mode == "normal":
+        values = reference
+    elif mode == "orthogonal_rows":
+        if parameter.size(0) > parameter.size(1):
+            raise ValueError(
+                "orthogonal embedding rows require vocabulary size <= d_model"
+            )
+        values = torch.linalg.qr(reference.T, mode="reduced").Q.T
+        values = values * (std / values.std().clamp_min(1e-12))
+    elif mode == "deterministic_orthogonal_rows":
+        rows, dimension = parameter.shape
+        if rows >= dimension:
+            raise ValueError(
+                "deterministic orthogonal embedding rows require vocabulary size < d_model"
+            )
+        positions = torch.arange(
+            dimension, device=parameter.device, dtype=parameter.dtype
+        ).add_(0.5)
+        frequencies = torch.arange(
+            1, rows + 1, device=parameter.device, dtype=parameter.dtype
+        ).unsqueeze(1)
+        values = torch.cos(math.pi * frequencies * positions / dimension)
+        values = values * math.sqrt(2.0 / dimension)
+        values = values * (std / values.std().clamp_min(1e-12))
+    else:
+        raise ValueError(
+            "embedding_initialization must be normal, orthogonal_rows, or "
+            "deterministic_orthogonal_rows"
+        )
+    with torch.no_grad():
+        parameter.copy_(values)
+
+
 def initialize_transformer_blocks(blocks, mode):
     if mode == "default":
         return
@@ -140,6 +176,7 @@ class RMTAuxLM(nn.Module):
         inverse_position_initialization="copy",
         position_initialization="normal",
         block_initialization="default",
+        embedding_initialization="normal",
         embedding_initialization_std=0.02,
         share_inverse_embedding=True,
         share_inverse_head=True,
@@ -219,6 +256,16 @@ class RMTAuxLM(nn.Module):
                 "or orthogonal_residual"
             )
         self.block_initialization = block_initialization
+        if embedding_initialization not in {
+            "normal",
+            "orthogonal_rows",
+            "deterministic_orthogonal_rows",
+        }:
+            raise ValueError(
+                "embedding_initialization must be normal, orthogonal_rows, or "
+                "deterministic_orthogonal_rows"
+            )
+        self.embedding_initialization = embedding_initialization
         if embedding_initialization_std <= 0:
             raise ValueError("embedding_initialization_std must be positive")
         self.embedding_initialization_std = embedding_initialization_std
@@ -349,8 +396,10 @@ class RMTAuxLM(nn.Module):
         self._initial_aux_diagnostics_pending = True
 
     def reset_parameters(self):
-        nn.init.normal_(
-            self.embedding.weight, std=self.embedding_initialization_std
+        initialize_embedding(
+            self.embedding.weight,
+            self.embedding_initialization,
+            self.embedding_initialization_std,
         )
         nn.init.normal_(self.initial_memory, std=0.02)
         nn.init.normal_(self.forward_queries, std=0.02)
