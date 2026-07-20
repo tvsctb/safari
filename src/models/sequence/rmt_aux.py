@@ -1,4 +1,5 @@
 import copy
+import math
 
 import torch
 import torch.nn as nn
@@ -57,6 +58,31 @@ class CausalTransformerBlock(nn.Module):
         return x + self.dropout(self.mlp(self.norm2(x)))
 
 
+def initialize_position_embedding(parameter, mode, std=0.02):
+    if mode == "normal":
+        nn.init.normal_(parameter, std=std)
+        return
+    if mode != "sinusoidal":
+        raise ValueError("position_initialization must be normal or sinusoidal")
+    length, dimension = parameter.shape
+    positions = torch.arange(
+        length, device=parameter.device, dtype=parameter.dtype
+    ).unsqueeze(1)
+    frequencies = torch.exp(
+        torch.arange(
+            0, dimension, 2, device=parameter.device, dtype=parameter.dtype
+        )
+        * (-math.log(10000.0) / dimension)
+    )
+    values = torch.zeros_like(parameter)
+    values[:, 0::2] = torch.sin(positions * frequencies)
+    values[:, 1::2] = torch.cos(positions * frequencies[: values[:, 1::2].shape[1]])
+    values = values - values.mean()
+    values = values * (std / values.std().clamp_min(1e-12))
+    with torch.no_grad():
+        parameter.copy_(values)
+
+
 class RMTAuxLM(nn.Module):
     """Decoder-only RMT implementing the report's inverse-auxiliary options."""
 
@@ -74,6 +100,7 @@ class RMTAuxLM(nn.Module):
         share_inverse=True,
         share_inverse_position_embedding=None,
         inverse_position_initialization="copy",
+        position_initialization="normal",
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
@@ -136,6 +163,11 @@ class RMTAuxLM(nn.Module):
                 "inverse_position_initialization must be copy or independent"
             )
         self.inverse_position_initialization = inverse_position_initialization
+        if position_initialization not in {"normal", "sinusoidal"}:
+            raise ValueError(
+                "position_initialization must be normal or sinusoidal"
+            )
+        self.position_initialization = position_initialization
         self.share_inverse_embedding = share_inverse_embedding
         self.share_inverse_head = share_inverse_head
         self.use_direction_embedding = resolve_direction_embedding(
@@ -267,7 +299,9 @@ class RMTAuxLM(nn.Module):
         nn.init.normal_(self.initial_memory, std=0.02)
         nn.init.normal_(self.forward_queries, std=0.02)
         nn.init.normal_(self.inverse_queries, std=0.02)
-        nn.init.normal_(self.position_embedding, std=0.02)
+        initialize_position_embedding(
+            self.position_embedding, self.position_initialization
+        )
         with torch.no_grad():
             if self.inverse_embedding is not self.embedding:
                 self.inverse_embedding.weight.copy_(self.embedding.weight)

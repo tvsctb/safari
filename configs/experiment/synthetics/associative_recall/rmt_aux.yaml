@@ -23,6 +23,7 @@ model:
   share_inverse: true
   share_inverse_position_embedding: true
   inverse_position_initialization: copy
+  position_initialization: normal
   share_inverse_embedding: true
   share_inverse_head: true
   # Boundary-scheme switch; independent of parameter sharing.

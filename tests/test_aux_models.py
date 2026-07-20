@@ -931,6 +931,34 @@ class AuxModelTest(unittest.TestCase):
                 inverse_position_initialization="unknown",
             )
 
+    def test_sinusoidal_position_initialization_is_seed_independent(self):
+        positions = []
+        for seed in (0, 1):
+            torch.manual_seed(seed)
+            model = RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                position_initialization="sinusoidal",
+            )
+            positions.append(model.position_embedding.detach().clone())
+        torch.testing.assert_close(positions[0], positions[1])
+        self.assertAlmostEqual(positions[0].mean().item(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(positions[0].std().item(), 0.02, delta=1e-6)
+
+    def test_position_initialization_rejects_unknown_mode(self):
+        with self.assertRaisesRegex(ValueError, "normal or sinusoidal"):
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                position_initialization="unknown",
+            )
+
     def test_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
             models = [
