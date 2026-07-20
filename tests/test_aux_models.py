@@ -982,7 +982,7 @@ class AuxModelTest(unittest.TestCase):
             )
 
     def test_block_initialization_rejects_unknown_mode(self):
-        with self.assertRaisesRegex(ValueError, "default or orthogonal_residual"):
+        with self.assertRaisesRegex(ValueError, "default, residual_scaled"):
             RMTAuxLM(
                 d_model=8,
                 n_layer=1,
@@ -991,6 +991,38 @@ class AuxModelTest(unittest.TestCase):
                 vocab_size=20,
                 block_initialization="unknown",
             )
+
+    def test_block_initialization_factorial_separates_scale_and_geometry(self):
+        torch.manual_seed(7)
+        residual = RMTAuxLM(
+            d_model=8, n_layer=2, d_inner=16, n_heads=2, vocab_size=20,
+            block_initialization="residual_scaled",
+        )
+        torch.manual_seed(7)
+        default = RMTAuxLM(
+            d_model=8, n_layer=2, d_inner=16, n_heads=2, vocab_size=20,
+            block_initialization="default",
+        )
+        gain = 0.5
+        torch.testing.assert_close(
+            residual.blocks[0].attention.in_proj_weight,
+            default.blocks[0].attention.in_proj_weight,
+        )
+        torch.testing.assert_close(
+            residual.blocks[0].attention.out_proj.weight,
+            default.blocks[0].attention.out_proj.weight * gain,
+        )
+        torch.manual_seed(7)
+        orthogonal = RMTAuxLM(
+            d_model=8, n_layer=2, d_inner=16, n_heads=2, vocab_size=20,
+            block_initialization="orthogonal",
+        )
+        singular_values = torch.linalg.svdvals(
+            orthogonal.blocks[0].attention.out_proj.weight
+        )
+        torch.testing.assert_close(
+            singular_values, torch.ones_like(singular_values), atol=1e-5, rtol=1e-5
+        )
 
     def test_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
