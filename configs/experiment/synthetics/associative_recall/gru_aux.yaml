@@ -63,6 +63,7 @@ task:
   aux_solved_ce_threshold: null
   aux_solved_ce_ema_beta: 0.99
   aux_post_solve_weight: 0.1
+  aux_post_solve_adaptive_end_step: null
   aux_post_solve_hold_steps: 0
   aux_post_solve_decay_steps: 1
   aux_component_weights: {}

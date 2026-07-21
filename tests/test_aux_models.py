@@ -272,10 +272,12 @@ class AuxTaskMetricTest(unittest.TestCase):
             aux_solved_ce_threshold=0.05,
             aux_solved_ce_ema_beta=0.0,
             aux_post_solve_weight=0.1,
+            aux_post_solve_adaptive_end_step=20,
             aux_post_solve_hold_steps=4,
             aux_post_solve_decay_steps=10,
         )
         task._current_aux_weight = 1.0
+        task._aux_schedule_step = 5
         task._update_aux_ce_gate(
             {"chunk_ce": torch.tensor(0.04), "discrete_ce": torch.tensor(0.06)}
         )
@@ -285,6 +287,8 @@ class AuxTaskMetricTest(unittest.TestCase):
         )
         self.assertTrue(task._aux_ce_solved_latched)
         self.assertEqual(task._aux_post_solve_start_weight, 1.0)
+        self.assertEqual(task._aux_ce_solve_schedule_step, 5)
+        self.assertAlmostEqual(task._aux_post_solve_target_weight, 0.075)
         task._aux_post_solve_step = 4
         held_progress = max(
             task._aux_post_solve_step - task.aux_post_solve_hold_steps, 0
@@ -296,9 +300,9 @@ class AuxTaskMetricTest(unittest.TestCase):
         ) / task.aux_post_solve_decay_steps
         weight = (
             task._aux_post_solve_start_weight * (1.0 - progress)
-            + task.aux_post_solve_weight * progress
+            + task._aux_post_solve_target_weight * progress
         )
-        self.assertAlmostEqual(weight, 0.55)
+        self.assertAlmostEqual(weight, 0.5375)
 
     def test_auxiliary_ce_gate_validates_configuration(self):
         with self.assertRaisesRegex(ValueError, "finite and positive"):
@@ -307,6 +311,10 @@ class AuxTaskMetricTest(unittest.TestCase):
             AuxLMTask(loss="cross_entropy", aux_post_solve_decay_steps=0)
         with self.assertRaisesRegex(ValueError, "non-negative integer"):
             AuxLMTask(loss="cross_entropy", aux_post_solve_hold_steps=-1)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            AuxLMTask(
+                loss="cross_entropy", aux_post_solve_adaptive_end_step=0
+            )
 
     def test_component_metrics_are_forwarded_to_the_logger(self):
         task = object.__new__(AuxLMTask)

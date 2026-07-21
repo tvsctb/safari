@@ -434,6 +434,7 @@ class AuxLMTask(LMTask):
         aux_solved_ce_threshold=None,
         aux_solved_ce_ema_beta=0.99,
         aux_post_solve_weight=0.1,
+        aux_post_solve_adaptive_end_step=None,
         aux_post_solve_hold_steps=0,
         aux_post_solve_decay_steps=1,
         **kwargs,
@@ -492,6 +493,15 @@ class AuxLMTask(LMTask):
             or float(aux_post_solve_weight) < 0
         ):
             raise ValueError("aux_post_solve_weight must be finite and non-negative")
+        if aux_post_solve_adaptive_end_step is not None:
+            if (
+                isinstance(aux_post_solve_adaptive_end_step, bool)
+                or not isinstance(aux_post_solve_adaptive_end_step, int)
+                or aux_post_solve_adaptive_end_step <= 0
+            ):
+                raise ValueError(
+                    "aux_post_solve_adaptive_end_step must be a positive integer"
+                )
         if (
             isinstance(aux_post_solve_hold_steps, bool)
             or not isinstance(aux_post_solve_hold_steps, int)
@@ -529,11 +539,14 @@ class AuxLMTask(LMTask):
         self.aux_solved_ce_threshold = aux_solved_ce_threshold
         self.aux_solved_ce_ema_beta = float(aux_solved_ce_ema_beta)
         self.aux_post_solve_weight = float(aux_post_solve_weight)
+        self.aux_post_solve_adaptive_end_step = aux_post_solve_adaptive_end_step
         self.aux_post_solve_hold_steps = aux_post_solve_hold_steps
         self.aux_post_solve_decay_steps = aux_post_solve_decay_steps
         self._aux_ce_ema = {"chunk_ce": None, "discrete_ce": None}
         self._aux_ce_solved_latched = False
         self._aux_post_solve_start_weight = None
+        self._aux_post_solve_target_weight = self.aux_post_solve_weight
+        self._aux_ce_solve_schedule_step = None
         self._aux_post_solve_step = 0
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
         self._aux_gradient_norm_step = 0
@@ -561,6 +574,16 @@ class AuxLMTask(LMTask):
         ):
             self._aux_ce_solved_latched = True
             self._aux_post_solve_start_weight = self._current_aux_weight
+            self._aux_ce_solve_schedule_step = self._aux_schedule_step
+            self._aux_post_solve_target_weight = self.aux_post_solve_weight
+            if self.aux_post_solve_adaptive_end_step is not None:
+                remaining = max(
+                    1.0
+                    - self._aux_ce_solve_schedule_step
+                    / self.aux_post_solve_adaptive_end_step,
+                    0.0,
+                )
+                self._aux_post_solve_target_weight *= remaining
             self._aux_post_solve_step = 0
 
     def _training_loss(self, logits, targets, aux_loss=None, **kwargs):
@@ -614,7 +637,7 @@ class AuxLMTask(LMTask):
                 )
                 scheduled_weight = (
                     self._aux_post_solve_start_weight * (1.0 - progress)
-                    + self.aux_post_solve_weight * progress
+                    + self._aux_post_solve_target_weight * progress
                 )
             self._current_aux_weight = (
                 scheduled_weight if self._aux_activation_latched else 0.0
@@ -672,6 +695,13 @@ class AuxLMTask(LMTask):
             w["aux_metrics"]["aux/post_solve_step"] = logits.detach().new_tensor(
                 float(self._aux_post_solve_step)
             )
+            w["aux_metrics"]["aux/post_solve_target_weight"] = (
+                logits.detach().new_tensor(self._aux_post_solve_target_weight)
+            )
+            if self._aux_ce_solve_schedule_step is not None:
+                w["aux_metrics"]["aux/ce_solve_schedule_step"] = (
+                    logits.detach().new_tensor(self._aux_ce_solve_schedule_step)
+                )
             for name, value in self._aux_ce_ema.items():
                 if value is not None:
                     w["aux_metrics"][f"aux/{name}_ema"] = (
