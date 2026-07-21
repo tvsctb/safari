@@ -29,7 +29,6 @@ from src.tasks.tasks import (
     normalize_aux_component_weights,
     scheduled_aux_weight,
     scheduled_aux_component_weights,
-    terminal_lm_token_weights,
     weighted_aux_components,
 )
 from src.utils.initialization import transplant_initialization
@@ -266,33 +265,6 @@ class AuxTaskMetricTest(unittest.TestCase):
                 loss="cross_entropy",
                 aux_activation_lm_loss_ema_beta=1.0,
             )
-
-    def test_terminal_lm_weight_reweights_only_last_valid_target(self):
-        task = AuxLMTask(
-            loss="cross_entropy",
-            lm_terminal_token_weight=4.0,
-        )
-        logits = torch.tensor(
-            [[3.0, 0.0], [0.0, 3.0], [2.0, 0.0], [0.0, 2.0]]
-        )
-        targets = torch.tensor([0, 1, 0, -100])
-        weights = torch.tensor([1.0, 4.0, 1.0, 0.0])
-        actual = task._lm_loss(logits, targets, weights)
-        per_token = F.cross_entropy(
-            logits, targets, ignore_index=-100, reduction="none"
-        )
-        expected = (per_token * weights).sum() / weights.sum()
-        torch.testing.assert_close(actual, expected)
-
-        sequence_targets = torch.tensor([[1, 2, -100], [3, 4, 5]])
-        torch.testing.assert_close(
-            terminal_lm_token_weights(sequence_targets, 4.0),
-            torch.tensor([[1.0, 4.0, 0.0], [1.0, 1.0, 4.0]]),
-        )
-
-    def test_terminal_lm_weight_validates_configuration(self):
-        with self.assertRaisesRegex(ValueError, "finite and positive"):
-            AuxLMTask(loss="cross_entropy", lm_terminal_token_weight=0.0)
 
     def test_component_metrics_are_forwarded_to_the_logger(self):
         task = object.__new__(AuxLMTask)

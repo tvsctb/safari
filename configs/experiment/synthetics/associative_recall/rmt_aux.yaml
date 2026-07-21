@@ -69,8 +69,6 @@ task:
   # reaches this threshold, then start the schedule above from step zero.
   aux_activation_lm_loss_threshold: null
   aux_activation_lm_loss_ema_beta: 0.99
-  # Reweight the last non-masked next-token target in each training sequence.
-  lm_terminal_token_weight: 1.0
   # Sparse component multipliers; omitted entries default to 1.0. Both maps use
   # the same schedule and step interval as aux_weight.
   aux_component_weights: {}
