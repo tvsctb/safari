@@ -416,6 +416,20 @@ def weighted_aux_components(loss_components, component_weights):
     return weighted, total
 
 
+def terminal_lm_token_weights(targets, terminal_weight, dtype=None):
+    """Weight the final non-masked target of every sequence."""
+    if targets.ndim != 2:
+        raise ValueError(
+            "lm_terminal_token_weight currently requires [batch, sequence] targets"
+        )
+    valid_targets = targets != -100
+    reverse_offset = valid_targets.flip(-1).to(torch.int64).argmax(-1)
+    terminal_index = targets.shape[-1] - 1 - reverse_offset
+    weights = torch.ones_like(targets, dtype=dtype or torch.float32)
+    weights.scatter_(-1, terminal_index.unsqueeze(-1), float(terminal_weight))
+    return weights.masked_fill(~valid_targets, 0.0)
+
+
 class AuxLMTask(LMTask):
     """Language modeling task that adds a model-provided inverse auxiliary."""
 
@@ -431,6 +445,7 @@ class AuxLMTask(LMTask):
         aux_component_weights_final=None,
         aux_activation_lm_loss_threshold=None,
         aux_activation_lm_loss_ema_beta=0.99,
+        lm_terminal_token_weight=1.0,
         **kwargs,
     ):
         if (
@@ -467,6 +482,12 @@ class AuxLMTask(LMTask):
             raise ValueError(
                 "aux_activation_lm_loss_ema_beta must be in [0, 1)"
             )
+        if (
+            isinstance(lm_terminal_token_weight, bool)
+            or not math.isfinite(float(lm_terminal_token_weight))
+            or float(lm_terminal_token_weight) <= 0
+        ):
+            raise ValueError("lm_terminal_token_weight must be finite and positive")
         self.aux_weight = float(aux_weight)
         self.aux_weight_schedule = aux_weight_schedule
         self.aux_weight_final = float(aux_weight_final)
@@ -487,6 +508,7 @@ class AuxLMTask(LMTask):
         )
         self._aux_activation_lm_loss_ema = None
         self._aux_activation_latched = aux_activation_lm_loss_threshold is None
+        self.lm_terminal_token_weight = float(lm_terminal_token_weight)
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
         self._aux_gradient_norm_step = 0
         super().__init__(**kwargs)
@@ -494,8 +516,28 @@ class AuxLMTask(LMTask):
         self.loss = self._training_loss
         self.loss_val = self.lm_loss
 
-    def _training_loss(self, logits, targets, aux_loss=None, **kwargs):
-        loss = self.lm_loss(logits, targets)
+    def _lm_loss(self, logits, targets, lm_token_weights=None):
+        if lm_token_weights is None or self.lm_terminal_token_weight == 1.0:
+            return self.lm_loss(logits, targets)
+        token_losses = F.cross_entropy(
+            logits,
+            targets,
+            ignore_index=-100,
+            reduction="none",
+        )
+        valid = targets != -100
+        weights = lm_token_weights.to(token_losses.dtype) * valid
+        return (token_losses * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _training_loss(
+        self,
+        logits,
+        targets,
+        aux_loss=None,
+        lm_token_weights=None,
+        **kwargs,
+    ):
+        loss = self._lm_loss(logits, targets, lm_token_weights)
         lm_loss_value = loss.detach().item()
         if self._aux_activation_lm_loss_ema is None:
             self._aux_activation_lm_loss_ema = lm_loss_value
@@ -565,9 +607,19 @@ class AuxLMTask(LMTask):
         w["aux_metrics"] = (
             dict(getattr(model, "metrics", {})) if compute_aux else {}
         )
+        lm_token_weights = None
+        if self.lm_terminal_token_weight != 1.0:
+            lm_token_weights = terminal_lm_token_weights(
+                y,
+                self.lm_terminal_token_weight,
+                dtype=output.logits.dtype,
+            )
         logits = rearrange(output.logits, '... C -> (...) C')
         targets = rearrange(y, '... -> (...)')
-        w["metric_loss"] = self.lm_loss(logits, targets)
+        if lm_token_weights is not None:
+            lm_token_weights = rearrange(lm_token_weights, '... -> (...)')
+            w["lm_token_weights"] = lm_token_weights
+        w["metric_loss"] = self._lm_loss(logits, targets, lm_token_weights)
         if model.training:
             w["aux_metrics"]["aux/weight"] = logits.detach().new_tensor(
                 self._current_aux_weight
