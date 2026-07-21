@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+# Simple time-only AUX decay at the best local static scale. AUX stays at 1
+# for 60% of training and then decays to a fixed nonzero maintenance floor.
+set -euo pipefail
+
+python -c 'import os; assert os.environ.get("WANDB_API_KEY")'
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+
+seed="${SHARD:?SHARD must be seed 0, 1, or 2}"
+if (( seed < 0 || seed > 2 )); then
+  echo "SHARD must be seed 0, 1, or 2" >&2
+  exit 2
+fi
+
+group="${WANDB_GROUP:-rmt-d32-tauweak-deterministic-decay-20260721-v1}"
+max_epochs="${MAX_EPOCHS:-240}"
+steps_per_epoch=157
+training_steps="$((steps_per_epoch * max_epochs))"
+warmup_steps="$((training_steps / 10))"
+decay_start_steps="$((training_steps * 60 / 100))"
+output_root="${OUTPUT_ROOT:-/tmp/rmt-d32-tauweak-deterministic-decay}/seed-${seed}"
+mkdir -p "$output_root"
+
+common=(
+  experiment=synthetics/associative_recall/rmt_aux
+  trainer.max_epochs="$max_epochs" callbacks=full_run
+  +trainer.check_val_every_n_epoch=5 +trainer.num_sanity_val_steps=0
+  trainer.log_every_n_steps=50 trainer.limit_train_batches=1.0
+  trainer.limit_val_batches=1.0 +trainer.precision=32
+  trainer.gradient_clip_val=0.0 train.test=false loader.num_workers=0
+  scheduler=linear_warmup scheduler.num_warmup_steps="$warmup_steps"
+  scheduler.num_training_steps="$training_steps"
+  task.aux_gradient_norm_interval="$steps_per_epoch"
+  task.aux_weight=1.0
+  task.aux_weight_decay_start_step="$decay_start_steps"
+  task.aux_weight_decay_end_step="$training_steps"
+  task.aux_activation_lm_loss_threshold=null
+  task.aux_solved_ce_threshold=null
+  optimizer.lr=0.0005 optimizer.weight_decay=0.1
+  model.d_model=32 model.d_inner=128 model.n_layer=2 model.n_heads=1
+  model.chunk_size=4 model.num_memory_tokens=4
+  model.share_inverse=true model.share_inverse_embedding=true
+  model.share_inverse_head=true model.share_inverse_position_embedding=true
+  model.inverse_position_initialization=copy model.use_direction_embedding=true
+  model.use_chunk_loss=true model.use_discrete_loss=true
+  model.use_memory_loss=true model.use_terminal_loss=true
+  model.use_terminal_chunk=false model.use_terminal_chunk_loss=false
+  model.learnable_terminal_target=true model.stop_gradient_memory_target=true
+  model.stop_gradient_memory_observation=false
+  model.memory_observation_gradient_scale=1.0
+  model.memory_scale_mode=fixed model.memory_scale_granularity=global
+  model.rho=31.622777
+  model.terminal_scale_mode=fixed model.terminal_scale_granularity=global
+  model.tau=11.925695
+  model.observation_noise_std=0.0 model.generation_noise_std=0.0
+  wandb.mode=online wandb.project=aux-assoc-recall wandb.group="$group"
+)
+
+conditions=(
+  "linear|0.2"
+  "linear|0.3"
+  "linear|0.4"
+  "cosine|0.2"
+  "cosine|0.3"
+  "cosine|0.4"
+)
+
+pids=()
+names=()
+for condition in "${conditions[@]}"; do
+  IFS='|' read -r schedule floor <<<"$condition"
+  floor_label="${floor/./p}"
+  name="rmt-d32-tauweak-${schedule}-floor${floor_label}-s${seed}-v1"
+  python -m train "${common[@]}" train.seed="$seed" \
+    task.aux_weight_schedule="$schedule" task.aux_weight_final="$floor" \
+    callbacks.model_checkpoint.dirpath="$output_root/$name/checkpoints" \
+    wandb.name="$name" wandb.id="$name" hydra.run.dir="$output_root/$name" \
+    >"$output_root/$name.log" 2>&1 &
+  pids+=("$!")
+  names+=("$name")
+done
+
+status=0
+for index in "${!pids[@]}"; do
+  wait "${pids[$index]}" || status=1
+  tail -n 40 "$output_root/${names[$index]}.log"
+done
+exit "$status"
