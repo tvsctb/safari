@@ -60,6 +60,10 @@ task:
   aux_weight_decay_end_step: 1
   aux_activation_lm_loss_threshold: null
   aux_activation_lm_loss_ema_beta: 0.99
+  aux_solved_ce_threshold: null
+  aux_solved_ce_ema_beta: 0.99
+  aux_post_solve_weight: 0.1
+  aux_post_solve_decay_steps: 1
   aux_component_weights: {}
   aux_component_weights_final: {}
   # 0 disables extra autograd passes; use the number of train batches for once/epoch.

@@ -266,6 +266,37 @@ class AuxTaskMetricTest(unittest.TestCase):
                 aux_activation_lm_loss_ema_beta=1.0,
             )
 
+    def test_auxiliary_ce_gate_latches_and_decays_weight(self):
+        task = AuxLMTask(
+            loss="cross_entropy",
+            aux_solved_ce_threshold=0.05,
+            aux_solved_ce_ema_beta=0.0,
+            aux_post_solve_weight=0.1,
+            aux_post_solve_decay_steps=10,
+        )
+        task._current_aux_weight = 1.0
+        task._update_aux_ce_gate(
+            {"chunk_ce": torch.tensor(0.04), "discrete_ce": torch.tensor(0.06)}
+        )
+        self.assertFalse(task._aux_ce_solved_latched)
+        task._update_aux_ce_gate(
+            {"chunk_ce": torch.tensor(0.04), "discrete_ce": torch.tensor(0.03)}
+        )
+        self.assertTrue(task._aux_ce_solved_latched)
+        self.assertEqual(task._aux_post_solve_start_weight, 1.0)
+        progress = 5 / task.aux_post_solve_decay_steps
+        weight = (
+            task._aux_post_solve_start_weight * (1.0 - progress)
+            + task.aux_post_solve_weight * progress
+        )
+        self.assertAlmostEqual(weight, 0.55)
+
+    def test_auxiliary_ce_gate_validates_configuration(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            AuxLMTask(loss="cross_entropy", aux_solved_ce_threshold=0.0)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            AuxLMTask(loss="cross_entropy", aux_post_solve_decay_steps=0)
+
     def test_component_metrics_are_forwarded_to_the_logger(self):
         task = object.__new__(AuxLMTask)
         task.lm_loss = lambda logits, targets: logits.sum() * 0.0

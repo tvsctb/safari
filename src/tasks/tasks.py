@@ -431,6 +431,10 @@ class AuxLMTask(LMTask):
         aux_component_weights_final=None,
         aux_activation_lm_loss_threshold=None,
         aux_activation_lm_loss_ema_beta=0.99,
+        aux_solved_ce_threshold=None,
+        aux_solved_ce_ema_beta=0.99,
+        aux_post_solve_weight=0.1,
+        aux_post_solve_decay_steps=1,
         **kwargs,
     ):
         if (
@@ -467,6 +471,32 @@ class AuxLMTask(LMTask):
             raise ValueError(
                 "aux_activation_lm_loss_ema_beta must be in [0, 1)"
             )
+        if aux_solved_ce_threshold is not None:
+            if (
+                isinstance(aux_solved_ce_threshold, bool)
+                or not math.isfinite(float(aux_solved_ce_threshold))
+                or float(aux_solved_ce_threshold) <= 0
+            ):
+                raise ValueError("aux_solved_ce_threshold must be finite and positive")
+            aux_solved_ce_threshold = float(aux_solved_ce_threshold)
+        if (
+            isinstance(aux_solved_ce_ema_beta, bool)
+            or not math.isfinite(float(aux_solved_ce_ema_beta))
+            or not 0 <= float(aux_solved_ce_ema_beta) < 1
+        ):
+            raise ValueError("aux_solved_ce_ema_beta must be in [0, 1)")
+        if (
+            isinstance(aux_post_solve_weight, bool)
+            or not math.isfinite(float(aux_post_solve_weight))
+            or float(aux_post_solve_weight) < 0
+        ):
+            raise ValueError("aux_post_solve_weight must be finite and non-negative")
+        if (
+            isinstance(aux_post_solve_decay_steps, bool)
+            or not isinstance(aux_post_solve_decay_steps, int)
+            or aux_post_solve_decay_steps <= 0
+        ):
+            raise ValueError("aux_post_solve_decay_steps must be a positive integer")
         self.aux_weight = float(aux_weight)
         self.aux_weight_schedule = aux_weight_schedule
         self.aux_weight_final = float(aux_weight_final)
@@ -487,12 +517,41 @@ class AuxLMTask(LMTask):
         )
         self._aux_activation_lm_loss_ema = None
         self._aux_activation_latched = aux_activation_lm_loss_threshold is None
+        self.aux_solved_ce_threshold = aux_solved_ce_threshold
+        self.aux_solved_ce_ema_beta = float(aux_solved_ce_ema_beta)
+        self.aux_post_solve_weight = float(aux_post_solve_weight)
+        self.aux_post_solve_decay_steps = aux_post_solve_decay_steps
+        self._aux_ce_ema = {"chunk_ce": None, "discrete_ce": None}
+        self._aux_ce_solved_latched = False
+        self._aux_post_solve_start_weight = None
+        self._aux_post_solve_step = 0
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
         self._aux_gradient_norm_step = 0
         super().__init__(**kwargs)
         self.lm_loss = self.loss
         self.loss = self._training_loss
         self.loss_val = self.lm_loss
+
+    def _update_aux_ce_gate(self, loss_components):
+        if self.aux_solved_ce_threshold is None or self._aux_ce_solved_latched:
+            return
+        if any(name not in loss_components for name in self._aux_ce_ema):
+            return
+        for name in self._aux_ce_ema:
+            value = loss_components[name]
+            value = value.detach().item()
+            current = self._aux_ce_ema[name]
+            beta = self.aux_solved_ce_ema_beta
+            self._aux_ce_ema[name] = (
+                value if current is None else beta * current + (1.0 - beta) * value
+            )
+        if all(
+            value <= self.aux_solved_ce_threshold
+            for value in self._aux_ce_ema.values()
+        ):
+            self._aux_ce_solved_latched = True
+            self._aux_post_solve_start_weight = self._current_aux_weight
+            self._aux_post_solve_step = 0
 
     def _training_loss(self, logits, targets, aux_loss=None, **kwargs):
         loss = self.lm_loss(logits, targets)
@@ -534,6 +593,15 @@ class AuxLMTask(LMTask):
                 self.aux_weight_decay_start_step,
                 self.aux_weight_decay_end_step,
             )
+            if self._aux_ce_solved_latched:
+                progress = min(
+                    self._aux_post_solve_step / self.aux_post_solve_decay_steps,
+                    1.0,
+                )
+                scheduled_weight = (
+                    self._aux_post_solve_start_weight * (1.0 - progress)
+                    + self.aux_post_solve_weight * progress
+                )
             self._current_aux_weight = (
                 scheduled_weight if self._aux_activation_latched else 0.0
             )
@@ -559,6 +627,8 @@ class AuxLMTask(LMTask):
             getattr(model, "loss_components", {}),
             self._current_aux_component_weights,
         )
+        if model.training and compute_aux:
+            self._update_aux_ce_gate(getattr(model, "loss_components", {}))
         w["aux_loss"] = (
             output.aux_loss if weighted_aux_loss is None else weighted_aux_loss
         )
@@ -582,6 +652,17 @@ class AuxLMTask(LMTask):
                 w["aux_metrics"]["aux/lm_loss_ema"] = (
                     logits.detach().new_tensor(self._aux_activation_lm_loss_ema)
                 )
+            w["aux_metrics"]["aux/ce_solved"] = logits.detach().new_tensor(
+                float(self._aux_ce_solved_latched)
+            )
+            w["aux_metrics"]["aux/post_solve_step"] = logits.detach().new_tensor(
+                float(self._aux_post_solve_step)
+            )
+            for name, value in self._aux_ce_ema.items():
+                if value is not None:
+                    w["aux_metrics"][f"aux/{name}_ema"] = (
+                        logits.detach().new_tensor(value)
+                    )
         if compute_aux:
             should_log_gradient_norms = (
                 self.aux_gradient_norm_interval > 0
@@ -608,6 +689,8 @@ class AuxLMTask(LMTask):
             # the auxiliary forward pass; otherwise a warm-up from zero stalls.
             if self._aux_activation_latched:
                 self._aux_schedule_step += 1
+            if self._aux_ce_solved_latched:
+                self._aux_post_solve_step += 1
         return logits, targets, w
 
     def metrics(
