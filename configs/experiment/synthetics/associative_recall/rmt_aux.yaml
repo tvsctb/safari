@@ -74,6 +74,7 @@ task:
   aux_solved_ce_threshold: null
   aux_solved_ce_ema_beta: 0.99
   aux_post_solve_weight: 0.1
+  aux_post_solve_hold_steps: 0
   aux_post_solve_decay_steps: 1
   # Sparse component multipliers; omitted entries default to 1.0. Both maps use
   # the same schedule and step interval as aux_weight.

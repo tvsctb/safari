@@ -272,6 +272,7 @@ class AuxTaskMetricTest(unittest.TestCase):
             aux_solved_ce_threshold=0.05,
             aux_solved_ce_ema_beta=0.0,
             aux_post_solve_weight=0.1,
+            aux_post_solve_hold_steps=4,
             aux_post_solve_decay_steps=10,
         )
         task._current_aux_weight = 1.0
@@ -284,7 +285,15 @@ class AuxTaskMetricTest(unittest.TestCase):
         )
         self.assertTrue(task._aux_ce_solved_latched)
         self.assertEqual(task._aux_post_solve_start_weight, 1.0)
-        progress = 5 / task.aux_post_solve_decay_steps
+        task._aux_post_solve_step = 4
+        held_progress = max(
+            task._aux_post_solve_step - task.aux_post_solve_hold_steps, 0
+        ) / task.aux_post_solve_decay_steps
+        self.assertEqual(held_progress, 0.0)
+        task._aux_post_solve_step = 9
+        progress = max(
+            task._aux_post_solve_step - task.aux_post_solve_hold_steps, 0
+        ) / task.aux_post_solve_decay_steps
         weight = (
             task._aux_post_solve_start_weight * (1.0 - progress)
             + task.aux_post_solve_weight * progress
@@ -296,6 +305,8 @@ class AuxTaskMetricTest(unittest.TestCase):
             AuxLMTask(loss="cross_entropy", aux_solved_ce_threshold=0.0)
         with self.assertRaisesRegex(ValueError, "positive integer"):
             AuxLMTask(loss="cross_entropy", aux_post_solve_decay_steps=0)
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            AuxLMTask(loss="cross_entropy", aux_post_solve_hold_steps=-1)
 
     def test_component_metrics_are_forwarded_to_the_logger(self):
         task = object.__new__(AuxLMTask)

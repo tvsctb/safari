@@ -434,6 +434,7 @@ class AuxLMTask(LMTask):
         aux_solved_ce_threshold=None,
         aux_solved_ce_ema_beta=0.99,
         aux_post_solve_weight=0.1,
+        aux_post_solve_hold_steps=0,
         aux_post_solve_decay_steps=1,
         **kwargs,
     ):
@@ -492,6 +493,14 @@ class AuxLMTask(LMTask):
         ):
             raise ValueError("aux_post_solve_weight must be finite and non-negative")
         if (
+            isinstance(aux_post_solve_hold_steps, bool)
+            or not isinstance(aux_post_solve_hold_steps, int)
+            or aux_post_solve_hold_steps < 0
+        ):
+            raise ValueError(
+                "aux_post_solve_hold_steps must be a non-negative integer"
+            )
+        if (
             isinstance(aux_post_solve_decay_steps, bool)
             or not isinstance(aux_post_solve_decay_steps, int)
             or aux_post_solve_decay_steps <= 0
@@ -520,6 +529,7 @@ class AuxLMTask(LMTask):
         self.aux_solved_ce_threshold = aux_solved_ce_threshold
         self.aux_solved_ce_ema_beta = float(aux_solved_ce_ema_beta)
         self.aux_post_solve_weight = float(aux_post_solve_weight)
+        self.aux_post_solve_hold_steps = aux_post_solve_hold_steps
         self.aux_post_solve_decay_steps = aux_post_solve_decay_steps
         self._aux_ce_ema = {"chunk_ce": None, "discrete_ce": None}
         self._aux_ce_solved_latched = False
@@ -595,7 +605,11 @@ class AuxLMTask(LMTask):
             )
             if self._aux_ce_solved_latched:
                 progress = min(
-                    self._aux_post_solve_step / self.aux_post_solve_decay_steps,
+                    max(
+                        self._aux_post_solve_step - self.aux_post_solve_hold_steps,
+                        0,
+                    )
+                    / self.aux_post_solve_decay_steps,
                     1.0,
                 )
                 scheduled_weight = (
