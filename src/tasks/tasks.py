@@ -429,6 +429,8 @@ class AuxLMTask(LMTask):
         aux_weight_decay_end_step=1,
         aux_component_weights=None,
         aux_component_weights_final=None,
+        aux_activation_lm_loss_threshold=None,
+        aux_activation_lm_loss_ema_beta=0.99,
         **kwargs,
     ):
         if (
@@ -445,6 +447,26 @@ class AuxLMTask(LMTask):
             aux_weight_decay_start_step,
             aux_weight_decay_end_step,
         )
+        if aux_activation_lm_loss_threshold is not None:
+            if (
+                isinstance(aux_activation_lm_loss_threshold, bool)
+                or not math.isfinite(float(aux_activation_lm_loss_threshold))
+                or float(aux_activation_lm_loss_threshold) <= 0
+            ):
+                raise ValueError(
+                    "aux_activation_lm_loss_threshold must be finite and positive"
+                )
+            aux_activation_lm_loss_threshold = float(
+                aux_activation_lm_loss_threshold
+            )
+        if (
+            isinstance(aux_activation_lm_loss_ema_beta, bool)
+            or not math.isfinite(float(aux_activation_lm_loss_ema_beta))
+            or not 0 <= float(aux_activation_lm_loss_ema_beta) < 1
+        ):
+            raise ValueError(
+                "aux_activation_lm_loss_ema_beta must be in [0, 1)"
+            )
         self.aux_weight = float(aux_weight)
         self.aux_weight_schedule = aux_weight_schedule
         self.aux_weight_final = float(aux_weight_final)
@@ -459,6 +481,12 @@ class AuxLMTask(LMTask):
         self._aux_schedule_step = 0
         self._current_aux_weight = self.aux_weight
         self._current_aux_component_weights = dict(self.aux_component_weights)
+        self.aux_activation_lm_loss_threshold = aux_activation_lm_loss_threshold
+        self.aux_activation_lm_loss_ema_beta = float(
+            aux_activation_lm_loss_ema_beta
+        )
+        self._aux_activation_lm_loss_ema = None
+        self._aux_activation_latched = aux_activation_lm_loss_threshold is None
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
         self._aux_gradient_norm_step = 0
         super().__init__(**kwargs)
@@ -468,6 +496,21 @@ class AuxLMTask(LMTask):
 
     def _training_loss(self, logits, targets, aux_loss=None, **kwargs):
         loss = self.lm_loss(logits, targets)
+        lm_loss_value = loss.detach().item()
+        if self._aux_activation_lm_loss_ema is None:
+            self._aux_activation_lm_loss_ema = lm_loss_value
+        else:
+            beta = self.aux_activation_lm_loss_ema_beta
+            self._aux_activation_lm_loss_ema = (
+                beta * self._aux_activation_lm_loss_ema
+                + (1.0 - beta) * lm_loss_value
+            )
+        if (
+            not self._aux_activation_latched
+            and self._aux_activation_lm_loss_ema
+            <= self.aux_activation_lm_loss_threshold
+        ):
+            self._aux_activation_latched = True
         if aux_loss is not None:
             loss = loss + self._current_aux_weight * aux_loss
         return loss
@@ -483,13 +526,16 @@ class AuxLMTask(LMTask):
         aux_tokens = z.pop("aux_tokens", None)
         x, w = encoder(x, **z)
         if model.training:
-            self._current_aux_weight = scheduled_aux_weight(
+            scheduled_weight = scheduled_aux_weight(
                 self.aux_weight,
                 self.aux_weight_final,
                 self.aux_weight_schedule,
                 self._aux_schedule_step,
                 self.aux_weight_decay_start_step,
                 self.aux_weight_decay_end_step,
+            )
+            self._current_aux_weight = (
+                scheduled_weight if self._aux_activation_latched else 0.0
             )
             self._current_aux_component_weights = scheduled_aux_component_weights(
                 self.aux_component_weights,
@@ -522,6 +568,20 @@ class AuxLMTask(LMTask):
         logits = rearrange(output.logits, '... C -> (...) C')
         targets = rearrange(y, '... -> (...)')
         w["metric_loss"] = self.lm_loss(logits, targets)
+        if model.training:
+            w["aux_metrics"]["aux/weight"] = logits.detach().new_tensor(
+                self._current_aux_weight
+            )
+            w["aux_metrics"]["aux/gate_active"] = logits.detach().new_tensor(
+                float(self._aux_activation_latched)
+            )
+            w["aux_metrics"]["aux/gate_schedule_step"] = (
+                logits.detach().new_tensor(float(self._aux_schedule_step))
+            )
+            if self._aux_activation_lm_loss_ema is not None:
+                w["aux_metrics"]["aux/lm_loss_ema"] = (
+                    logits.detach().new_tensor(self._aux_activation_lm_loss_ema)
+                )
         if compute_aux:
             should_log_gradient_norms = (
                 self.aux_gradient_norm_interval > 0
@@ -539,9 +599,6 @@ class AuxLMTask(LMTask):
                         self._current_aux_weight,
                     )
                 )
-            w["aux_metrics"]["aux/weight"] = logits.detach().new_tensor(
-                self._current_aux_weight
-            )
             for name, weight in self._current_aux_component_weights.items():
                 w["aux_metrics"][f"aux/component_weight/{name}"] = (
                     logits.detach().new_tensor(weight)
@@ -549,7 +606,8 @@ class AuxLMTask(LMTask):
         if model.training:
             # Advance schedules even when an initial zero overall weight skips
             # the auxiliary forward pass; otherwise a warm-up from zero stalls.
-            self._aux_schedule_step += 1
+            if self._aux_activation_latched:
+                self._aux_schedule_step += 1
         return logits, targets, w
 
     def metrics(

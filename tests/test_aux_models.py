@@ -226,6 +226,46 @@ class AuxiliaryUtilityTest(unittest.TestCase):
 
 
 class AuxTaskMetricTest(unittest.TestCase):
+    def test_auxiliary_lm_loss_gate_latches_and_starts_schedule_at_zero(self):
+        task = AuxLMTask(
+            loss="cross_entropy",
+            aux_weight=0.0,
+            aux_weight_final=1.0,
+            aux_weight_schedule="linear",
+            aux_weight_decay_start_step=0,
+            aux_weight_decay_end_step=10,
+            aux_activation_lm_loss_threshold=1.9,
+            aux_activation_lm_loss_ema_beta=0.0,
+        )
+        self.assertFalse(task._aux_activation_latched)
+        self.assertEqual(task._aux_schedule_step, 0)
+
+        logits = torch.tensor([[2.0, 0.0]])
+        targets = torch.tensor([1])
+        task._training_loss(logits, targets)
+        self.assertFalse(task._aux_activation_latched)
+
+        targets = torch.tensor([0])
+        task._training_loss(logits, targets)
+        self.assertTrue(task._aux_activation_latched)
+        self.assertEqual(task._aux_schedule_step, 0)
+
+        # The gate is one-way even if the subsequent loss rises again.
+        task._training_loss(logits, torch.tensor([1]))
+        self.assertTrue(task._aux_activation_latched)
+
+    def test_auxiliary_lm_loss_gate_validates_configuration(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            AuxLMTask(
+                loss="cross_entropy",
+                aux_activation_lm_loss_threshold=0.0,
+            )
+        with self.assertRaisesRegex(ValueError, "in \\[0, 1\\)"):
+            AuxLMTask(
+                loss="cross_entropy",
+                aux_activation_lm_loss_ema_beta=1.0,
+            )
+
     def test_component_metrics_are_forwarded_to_the_logger(self):
         task = object.__new__(AuxLMTask)
         task.lm_loss = lambda logits, targets: logits.sum() * 0.0

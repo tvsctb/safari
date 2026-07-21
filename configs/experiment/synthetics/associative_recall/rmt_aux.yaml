@@ -65,6 +65,10 @@ task:
   aux_weight_final: 0.1
   aux_weight_decay_start_step: 0
   aux_weight_decay_end_step: 1
+  # Optional one-way gate: hold AUX at zero until the EMA training LM loss
+  # reaches this threshold, then start the schedule above from step zero.
+  aux_activation_lm_loss_threshold: null
+  aux_activation_lm_loss_ema_beta: 0.99
   # Sparse component multipliers; omitted entries default to 1.0. Both maps use
   # the same schedule and step interval as aux_weight.
   aux_component_weights: {}
