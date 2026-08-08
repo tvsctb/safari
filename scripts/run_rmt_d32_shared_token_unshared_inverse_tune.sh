@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
-# Full-length compact tuning screen for a fully unshared inverse RMT.
-# Each shard is one seed and runs a 3 AUX-weight x 2 learning-rate factorial.
+# Full-length compact tuning screen for an inverse-dynamics RMT.
+# Token embedding/head stay shared, while inverse blocks/norm/PE are unshared.
+# Each shard is one seed and runs a 4 AUX-weight x 2 learning-rate factorial.
 set -euo pipefail
 
 python -c 'import os; key=os.environ.get("WANDB_API_KEY", ""); assert key and key != "WANDB_API_KEY", "WANDB_API_KEY secret was not injected"'
@@ -17,13 +18,13 @@ case "$shard" in
   *) echo "SHARD must be 0, 1, or 2" >&2; exit 2 ;;
 esac
 
-group="${WANDB_GROUP:-rmt-d32-fully-unshared-inverse-tune-20260723-v1}"
-suffix="${RUN_SUFFIX:-uinvtune400-v1}"
+group="${WANDB_GROUP:-rmt-d32-shared-token-unshared-inverse-tune-20260809-v1}"
+suffix="${RUN_SUFFIX:-stuinvtune400-v1}"
 max_epochs="${MAX_EPOCHS:-400}"
 steps_per_epoch=157
 training_steps="$((steps_per_epoch * max_epochs))"
 warmup_steps="$((training_steps / 5))"
-output_root="${OUTPUT_ROOT:-/tmp/rmt-d32-fully-unshared-inverse-tune}/shard-${shard}"
+output_root="${OUTPUT_ROOT:-/tmp/rmt-d32-shared-token-unshared-inverse-tune}/shard-${shard}"
 mkdir -p "$output_root"
 
 common=(
@@ -50,11 +51,11 @@ common=(
   model.chunk_size=4
   model.num_memory_tokens=4
   model.share_inverse=false
-  model.share_inverse_embedding=false
-  model.share_inverse_head=false
+  model.share_inverse_embedding=true
+  model.share_inverse_head=true
   model.share_inverse_position_embedding=false
   model.inverse_position_initialization=copy
-  model.use_direction_embedding=true
+  model.use_direction_embedding=false
   model.use_terminal_chunk=false
   model.use_terminal_chunk_loss=false
   model.learnable_terminal_target=true
@@ -92,7 +93,7 @@ launch() {
   local lr="$2"
   local lambda_label="$3"
   local aux_weight="$4"
-  local name="rmt-d32-uinv-lr${lr_label}-lambda${lambda_label}-s${seed}-${suffix}"
+  local name="rmt-d32-stuinv-lr${lr_label}-lambda${lambda_label}-s${seed}-${suffix}"
   echo "Launching $name"
   python -m train \
     "${common[@]}" \
@@ -111,6 +112,7 @@ launch() {
 
 for lr_spec in "05:0.0005" "10:0.001"; do
   IFS=: read -r lr_label lr <<<"$lr_spec"
+  launch "$lr_label" "$lr" 003 0.03
   launch "$lr_label" "$lr" 010 0.1
   launch "$lr_label" "$lr" 030 0.3
   launch "$lr_label" "$lr" 100 1.0
