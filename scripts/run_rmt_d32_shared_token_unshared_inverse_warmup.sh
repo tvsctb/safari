@@ -10,9 +10,9 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 
 shard="${SHARD:?SHARD must be set to 0, 1, or 2}"
 case "$shard" in
-  0) seed=149 ;;
-  1) seed=150 ;;
-  2) seed=151 ;;
+  0) seeds=(149) ;;
+  1) seeds=(150) ;;
+  2) seeds=(151 152) ;;
   *) echo "SHARD must be 0, 1, or 2" >&2; exit 2 ;;
 esac
 
@@ -21,7 +21,7 @@ suffix="${RUN_SUFFIX:-stuinvwarmup400-v1}"
 max_epochs="${MAX_EPOCHS:-400}"
 steps_per_epoch=157
 training_steps="$((steps_per_epoch * max_epochs))"
-output_root="${OUTPUT_ROOT:-/tmp/rmt-d32-shared-token-unshared-inverse-warmup}/seed-${seed}"
+output_root="${OUTPUT_ROOT:-/tmp/rmt-d32-shared-token-unshared-inverse-warmup}/shard-${shard}"
 mkdir -p "$output_root"
 
 common=(
@@ -92,22 +92,28 @@ conditions=(
 
 pids=()
 names=()
-for condition in "${conditions[@]}"; do
-  IFS='|' read -r label percent <<<"$condition"
-  warmup_steps="$((training_steps * percent / 100))"
-  name="rmt-d32-stuinv-${label}-s${seed}-${suffix}"
-  echo "Launching $name"
-  python -m train \
-    "${common[@]}" \
-    train.seed="$seed" \
-    scheduler.num_warmup_steps="$warmup_steps" \
-    callbacks.model_checkpoint.dirpath="$output_root/$name/checkpoints" \
-    wandb.name="$name" \
-    wandb.id="$name" \
-    hydra.run.dir="$output_root/$name" \
-    >"$output_root/$name.log" 2>&1 &
-  pids+=("$!")
-  names+=("$name")
+if (( ${#seeds[@]} * ${#conditions[@]} > 8 )); then
+  echo "Refusing to run $((${#seeds[@]} * ${#conditions[@]})) processes on one GPU" >&2
+  exit 2
+fi
+for seed in "${seeds[@]}"; do
+  for condition in "${conditions[@]}"; do
+    IFS='|' read -r label percent <<<"$condition"
+    warmup_steps="$((training_steps * percent / 100))"
+    name="rmt-d32-stuinv-${label}-s${seed}-${suffix}"
+    echo "Launching $name"
+    python -m train \
+      "${common[@]}" \
+      train.seed="$seed" \
+      scheduler.num_warmup_steps="$warmup_steps" \
+      callbacks.model_checkpoint.dirpath="$output_root/$name/checkpoints" \
+      wandb.name="$name" \
+      wandb.id="$name" \
+      hydra.run.dir="$output_root/$name" \
+      >"$output_root/$name.log" 2>&1 &
+    pids+=("$!")
+    names+=("$name")
+  done
 done
 
 echo "Warmup shard $shard launched ${#pids[@]} processes"
