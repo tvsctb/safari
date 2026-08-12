@@ -1,0 +1,74 @@
+# @package _global_
+defaults:
+  - /experiment/synthetics/induction_head/base.yaml
+
+dataset:
+  return_aux_tokens: true
+  loader_seed: null
+
+model:
+  _name_: rmt_aux_lm
+  d_model: 32
+  n_layer: 2
+  d_inner: 128
+  n_heads: 1
+  vocab_size: ${dataset.vocab_size}
+  token_scheme: boundary_reverse
+  chunk_size: 4
+  num_memory_tokens: 4
+  dropout: 0.0
+  share_inverse: false
+  share_inverse_position_embedding: false
+  inverse_position_initialization: copy
+  position_initialization: normal
+  block_initialization: default
+  block_initialization_seed: null
+  embedding_initialization: normal
+  embedding_initialization_std: 0.02
+  share_inverse_embedding: true
+  share_inverse_head: true
+  use_direction_embedding: false
+  generation_noise_std: 0.0
+  observation_noise_std: 0.0
+  use_chunk_loss: true
+  use_discrete_loss: true
+  use_memory_loss: true
+  memory_scale_mode: fixed
+  memory_scale_granularity: global
+  rho: 31.622777
+  memory_min_scale: 1e-4
+  memory_max_scale: 1e4
+  stop_gradient_memory_target: true
+  stop_gradient_memory_observation: false
+  memory_observation_gradient_scale: 1.0
+  use_terminal_loss: true
+  terminal_scale_mode: fixed
+  terminal_scale_granularity: global
+  tau: 11.925695
+  terminal_min_scale: 1e-4
+  terminal_max_scale: 1e4
+  learnable_terminal_target: true
+  use_terminal_chunk: false
+  use_terminal_chunk_loss: false
+
+task:
+  _name_: aux_lm
+  loss: cross_entropy
+  aux_weight: 0.1
+  aux_weight_schedule: fixed
+  aux_weight_final: 0.1
+  aux_weight_decay_start_step: 0
+  aux_weight_decay_end_step: 1
+  aux_activation_lm_loss_threshold: null
+  aux_activation_lm_loss_ema_beta: 0.99
+  aux_solved_ce_threshold: null
+  aux_solved_ce_ema_beta: 0.99
+  aux_post_solve_weight: 0.1
+  aux_post_solve_adaptive_end_step: null
+  aux_post_solve_hold_steps: 0
+  aux_post_solve_decay_steps: 1
+  aux_component_weights: {}
+  aux_component_weights_final: {}
+  aux_gradient_norm_interval: 0
+  torchmetrics: ['perplexity']
+  metrics: ['accuracy_ignore_index']
