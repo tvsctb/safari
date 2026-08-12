@@ -8,13 +8,18 @@ python -c 'import os; key=os.environ.get("WANDB_API_KEY", ""); assert key and ke
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 
+cohort="${COHORT:-confirmation}"
 shard="${SHARD:?SHARD must be set to 0, 1, 2, or 3}"
-case "$shard" in
-  0) seeds=(157 158 159) ;;
-  1) seeds=(160 161 162) ;;
-  2) seeds=(163 164 165) ;;
-  3) seeds=(166) ;;
-  *) echo "SHARD must be 0, 1, 2, or 3" >&2; exit 2 ;;
+case "$cohort:$shard" in
+  confirmation:0) seeds=(157 158 159) ;;
+  confirmation:1) seeds=(160 161 162) ;;
+  confirmation:2) seeds=(163 164 165) ;;
+  confirmation:3) seeds=(166) ;;
+  replication:0) seeds=(167 168 169) ;;
+  replication:1) seeds=(170 171 172) ;;
+  replication:2) seeds=(173 174 175) ;;
+  replication:3) seeds=(176) ;;
+  *) echo "COHORT must be confirmation or replication and SHARD must be 0-3" >&2; exit 2 ;;
 esac
 
 group="${WANDB_GROUP:-rmt-d32-unshared-wd01-aux-paired-20260811-v1}"
