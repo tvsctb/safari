@@ -14,8 +14,8 @@ case "$shard" in
   *) echo "SHARD must be 0 or 1" >&2; exit 2 ;;
 esac
 
-group="${WANDB_GROUP:-rmt-d32-unshared-induction-lambda-20260812-v1}"
-suffix="${RUN_SUFFIX:-stuinv-induction-lambda400-v1}"
+group="${WANDB_GROUP:-rmt-d32-unshared-induction-lambda-20260812-v2}"
+suffix="${RUN_SUFFIX:-stuinv-induction-lambda400-v2}"
 max_epochs="${MAX_EPOCHS:-400}"
 steps_per_epoch=157
 training_steps="$((steps_per_epoch * max_epochs))"

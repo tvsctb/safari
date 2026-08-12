@@ -1,10 +1,29 @@
 # @package _global_
 defaults:
-  - /experiment/synthetics/induction_head/base.yaml
+  - /pipeline: induction_head
+  - override /scheduler: linear_warmup
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  num_nodes: 1
+  max_epochs: 400
 
 dataset:
+  batch_size: 32
   return_aux_tokens: true
   loader_seed: null
+
+train:
+  global_batch_size: 32
+
+scheduler:
+  num_warmup_steps: ${eval:${div_up:${dataset.__train_len}, ${train.global_batch_size}} * ${div_up:${trainer.max_epochs}, 10}}
+  num_training_steps: ${eval:${div_up:${dataset.__train_len}, ${train.global_batch_size}} * ${trainer.max_epochs}}
+
+optimizer:
+  lr: 5e-4
+  weight_decay: 0.1
 
 model:
   _name_: rmt_aux_lm
