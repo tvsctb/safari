@@ -197,7 +197,11 @@ def transition_gain_proxies(
     seed=1234,
     transition_indices=None,
 ):
-    """Hutchinson JVP estimates of local carry and write mean-squared gain."""
+    """Hutchinson estimates of local carry and write mean-squared gain.
+
+    Central input finite differences avoid requiring second derivatives of
+    optimized attention kernels while still estimating Jacobian-vector gains.
+    """
     records = recurrent_transition_records(model, input_ids, aux_tokens)
     if transition_indices is None:
         transition_indices = sorted({0, len(records) // 2, len(records) - 1})
@@ -225,18 +229,26 @@ def transition_gain_proxies(
                 model.final_norm,
             )[1]
 
+        def finite_difference_jvp(function, value, probe):
+            value_rms = value.detach().float().square().mean().sqrt()
+            epsilon = 1e-3 * max(value_rms.item(), 1e-3)
+            with torch.no_grad():
+                plus = function(value + epsilon * probe)
+                minus = function(value - epsilon * probe)
+            return (plus - minus) / (2.0 * epsilon)
+
         for _ in range(int(probes)):
             memory_probe = _rademacher_like(memory, generator)
-            _, carry_jvp = torch.autograd.functional.jvp(
-                from_memory, memory, memory_probe, create_graph=False
+            carry_jvp = finite_difference_jvp(
+                from_memory, memory, memory_probe
             )
             carry_values.append(
                 carry_jvp.detach().float().square().sum()
                 / memory_probe.detach().float().square().sum()
             )
             token_probe = _rademacher_like(token_embeddings, generator)
-            _, write_jvp = torch.autograd.functional.jvp(
-                from_tokens, token_embeddings, token_probe, create_graph=False
+            write_jvp = finite_difference_jvp(
+                from_tokens, token_embeddings, token_probe
             )
             write_values.append(
                 write_jvp.detach().float().square().sum()

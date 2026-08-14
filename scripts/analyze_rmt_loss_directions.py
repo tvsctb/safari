@@ -160,7 +160,7 @@ def main():
             "probes": args.probes,
             "relative_steps": args.steps,
             "aux_weight": 0.1,
-            "proxy": "Hutchinson JVP mean-squared local transition gain",
+            "proxy": "Hutchinson central-finite-difference mean-squared local transition Jacobian gain",
             "theory_signs": {
                 "lm": {"write_gain": 1, "carry_gain": None},
                 "token": {"write_gain": 1, "carry_gain": -1},
