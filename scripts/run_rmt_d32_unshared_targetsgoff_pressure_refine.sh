@@ -145,6 +145,8 @@ names=()
 for ((job_index = start; job_index < end; job_index++)); do
   IFS='|' read -r seed pressure rho <<<"${jobs[$job_index]}"
   name="rmt-d32-stuinv-wd01-targetsg-off-p${pressure}-s${seed}-${suffix}"
+  wandb_dir="/tmp/wandb/$name"
+  mkdir -p "$wandb_dir"
   echo "Launching $name (rho=$rho)"
   python -m train \
     "${common[@]}" \
@@ -153,6 +155,7 @@ for ((job_index = start; job_index < end; job_index++)); do
     callbacks.model_checkpoint.dirpath="$output_root/$name/checkpoints" \
     wandb.name="$name" \
     wandb.id="$name" \
+    wandb.save_dir="$wandb_dir" \
     hydra.run.dir="$output_root/$name" \
     >"$output_root/$name.log" 2>&1 &
   pids+=("$!")
