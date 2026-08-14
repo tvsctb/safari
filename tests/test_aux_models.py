@@ -10,6 +10,7 @@ from src.models.sequence.auxiliary import (
     chunk_ranges,
     cross_entropy_sum,
     gaussian_nll_sum,
+    memory_reconstruction_diagnostics,
     mean_batch_variance,
     mean_reconstruction_mse,
     memory_observation,
@@ -333,6 +334,51 @@ class AuxTaskMetricTest(unittest.TestCase):
         self.assertEqual(metrics["aux/memory_nll"], component)
         self.assertEqual(metrics["aux_loss"].item(), 2.0)
         self.assertEqual(metrics["lm_loss"].item(), 0.5)
+
+    def test_compact_aux_metrics_keep_memory_scale_diagnostics(self):
+        task = object.__new__(AuxLMTask)
+        task.aux_metric_profile = "compact"
+        task.lm_loss = lambda logits, targets: logits.sum() * 0.0
+        logits = torch.zeros(2, 3)
+        targets = torch.zeros(2, dtype=torch.long)
+        with mock.patch.object(LMTask, "metrics", return_value={}):
+            metrics = task.metrics(
+                logits,
+                targets,
+                aux_metrics={
+                    "aux/memory_relative_mse": torch.tensor(0.5),
+                    "aux/rho": torch.tensor(22.0),
+                    "aux/terminal_chunk": torch.tensor(0.0),
+                    "grad_norm/forward/aux/memory_nll": torch.tensor(1.0),
+                    "grad_cosine/all/aux_aux/chunk_ce__memory_nll": torch.tensor(0.2),
+                },
+            )
+        self.assertIn("aux/memory_relative_mse", metrics)
+        self.assertIn("grad_norm/forward/aux/memory_nll", metrics)
+        self.assertNotIn("aux/rho", metrics)
+        self.assertNotIn("aux/terminal_chunk", metrics)
+        self.assertNotIn(
+            "grad_cosine/all/aux_aux/chunk_ce__memory_nll", metrics
+        )
+
+    def test_memory_reconstruction_diagnostics_separate_size_and_variance(self):
+        target = torch.tensor([[[1.0, 3.0]], [[3.0, 5.0]]])
+        estimate = target * 0.5
+        diagnostics = memory_reconstruction_diagnostics(
+            [target], [estimate], target
+        )
+        torch.testing.assert_close(
+            diagnostics["target_second_moment"], target.square().mean()
+        )
+        torch.testing.assert_close(
+            diagnostics["target_batch_variance"],
+            target.var(dim=0, correction=0).mean(),
+        )
+        torch.testing.assert_close(diagnostics["relative_mse"], torch.tensor(0.25))
+        torch.testing.assert_close(diagnostics["norm_ratio"], torch.tensor(0.5))
+        torch.testing.assert_close(
+            diagnostics["target_estimate_cosine"], torch.tensor(1.0)
+        )
 
     def test_gradient_norms_separate_forward_and_all_parameters(self):
         class ToyModel(torch.nn.Module):

@@ -13,6 +13,7 @@ from src.models.sequence.auxiliary import (
     cross_entropy_sum,
     gaussian_nll_sum,
     initialize_scale,
+    memory_reconstruction_diagnostics,
     mean_batch_variance,
     mean_reconstruction_mse,
     memory_observation,
@@ -751,6 +752,9 @@ class RMTAuxLM(nn.Module):
                 "terminal_chunk": loss_terminal_chunk,
                 "total": aux_loss,
             }
+            memory_diagnostics = memory_reconstruction_diagnostics(
+                memory_targets, memory_estimates, logits
+            )
             initial_aux_diagnostics = {}
             if self._initial_aux_diagnostics_pending:
                 for name, records in (
@@ -805,6 +809,10 @@ class RMTAuxLM(nn.Module):
                 "aux/memory_reconstruction_mse": mean_reconstruction_mse(
                     memory_targets, memory_estimates, logits
                 ),
+                **{
+                    f"aux/memory_{name}": value
+                    for name, value in memory_diagnostics.items()
+                },
                 "aux/terminal_reconstruction_mse": terminal_reconstruction_mse(
                     terminal_memory, self.terminal_target
                 ),

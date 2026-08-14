@@ -83,5 +83,9 @@ task:
   aux_component_weights_final: {}
   # 0 disables extra autograd passes; use the number of train batches for once/epoch.
   aux_gradient_norm_interval: 0
+  # Optional exact optimizer-batch indices for sparse gradient diagnostics.
+  aux_gradient_norm_steps: []
+  # compact removes fixed/zero/redundant W&B series without changing the loss.
+  aux_metric_profile: full
   torchmetrics: ['perplexity']
   metrics: ['accuracy_ignore_index']

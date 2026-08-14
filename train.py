@@ -601,14 +601,15 @@ class SequenceLightningModule(pl.LightningModule):
             if hasattr(module, "metrics"):
                 metrics.update(module.metrics)
 
-        self.log_dict(
-            metrics,
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            add_dataloader_idx=False,
-            sync_dist=True,
-        )
+        if self.hparams.train.get("log_model_metrics_on_step", True):
+            self.log_dict(
+                metrics,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                add_dataloader_idx=False,
+                sync_dist=True,
+            )
 
         return loss
 

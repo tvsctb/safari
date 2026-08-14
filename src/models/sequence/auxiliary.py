@@ -234,6 +234,74 @@ def mean_reconstruction_mse(targets, estimates, reference):
     ]).mean()
 
 
+def memory_reconstruction_diagnostics(targets, estimates, reference):
+    """Describe reconstruction quality relative to the target memory magnitude.
+
+    These detached diagnostics do not alter the optimized loss.  Second moments
+    measure absolute state size, while batch variance measures only dispersion
+    across examples and is therefore reported separately.
+    """
+    if not targets:
+        zero = reference.detach().new_zeros(())
+        return {
+            "target_second_moment": zero,
+            "estimate_second_moment": zero,
+            "residual_mse": zero,
+            "relative_mse": zero,
+            "relative_rmse": zero,
+            "norm_ratio": zero,
+            "target_estimate_cosine": zero,
+            "target_batch_variance": zero,
+            "estimate_batch_variance": zero,
+            "batch_r2": zero,
+        }
+    if len(targets) != len(estimates):
+        raise ValueError("targets and estimates must have the same length")
+
+    target_values = [value.detach().float() for value in targets]
+    estimate_values = [value.detach().float() for value in estimates]
+    target_second_moment = torch.stack(
+        [value.square().mean() for value in target_values]
+    ).mean()
+    estimate_second_moment = torch.stack(
+        [value.square().mean() for value in estimate_values]
+    ).mean()
+    residual_mse = torch.stack([
+        (target - estimate).square().mean()
+        for target, estimate in zip(target_values, estimate_values)
+    ]).mean()
+    target_batch_variance = mean_batch_variance(target_values, batch_axis=0)
+    estimate_batch_variance = mean_batch_variance(estimate_values, batch_axis=0)
+    epsilon = torch.finfo(target_second_moment.dtype).eps
+    relative_mse = residual_mse / target_second_moment.clamp_min(epsilon)
+
+    flat_target = torch.cat([value.reshape(-1) for value in target_values])
+    flat_estimate = torch.cat([value.reshape(-1) for value in estimate_values])
+    cosine_denominator = flat_target.norm() * flat_estimate.norm()
+    target_estimate_cosine = torch.where(
+        cosine_denominator > 0,
+        torch.dot(flat_target, flat_estimate)
+        / cosine_denominator.clamp_min(epsilon),
+        cosine_denominator.new_zeros(()),
+    )
+    return {
+        "target_second_moment": target_second_moment,
+        "estimate_second_moment": estimate_second_moment,
+        "residual_mse": residual_mse,
+        "relative_mse": relative_mse,
+        "relative_rmse": relative_mse.sqrt(),
+        "norm_ratio": (
+            estimate_second_moment.clamp_min(0).sqrt()
+            / target_second_moment.clamp_min(epsilon).sqrt()
+        ),
+        "target_estimate_cosine": target_estimate_cosine,
+        "target_batch_variance": target_batch_variance,
+        "estimate_batch_variance": estimate_batch_variance,
+        "batch_r2": 1.0
+        - residual_mse / target_batch_variance.clamp_min(epsilon),
+    }
+
+
 def terminal_reconstruction_mse(value, target=None):
     """Return raw terminal coordinate MSE, independent of terminal scale."""
     residual = value.detach() if target is None else value.detach() - target.detach()

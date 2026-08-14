@@ -423,6 +423,8 @@ class AuxLMTask(LMTask):
         self,
         aux_weight=1.0,
         aux_gradient_norm_interval=0,
+        aux_gradient_norm_steps=None,
+        aux_metric_profile="full",
         aux_weight_schedule="fixed",
         aux_weight_final=0.1,
         aux_weight_decay_start_step=0,
@@ -445,6 +447,17 @@ class AuxLMTask(LMTask):
             or aux_gradient_norm_interval < 0
         ):
             raise ValueError("aux_gradient_norm_interval must be a non-negative integer")
+        if aux_gradient_norm_steps is None:
+            aux_gradient_norm_steps = ()
+        if any(
+            isinstance(step, bool) or not isinstance(step, int) or step < 0
+            for step in aux_gradient_norm_steps
+        ):
+            raise ValueError(
+                "aux_gradient_norm_steps must contain non-negative integers"
+            )
+        if aux_metric_profile not in {"full", "compact"}:
+            raise ValueError("aux_metric_profile must be full or compact")
         scheduled_aux_weight(
             aux_weight,
             aux_weight_final,
@@ -549,6 +562,8 @@ class AuxLMTask(LMTask):
         self._aux_ce_solve_schedule_step = None
         self._aux_post_solve_step = 0
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
+        self.aux_gradient_norm_steps = frozenset(aux_gradient_norm_steps)
+        self.aux_metric_profile = aux_metric_profile
         self._aux_gradient_norm_step = 0
         super().__init__(**kwargs)
         self.lm_loss = self.loss
@@ -709,10 +724,13 @@ class AuxLMTask(LMTask):
                     )
         if compute_aux:
             should_log_gradient_norms = (
-                self.aux_gradient_norm_interval > 0
-                and self._aux_gradient_norm_step
-                % self.aux_gradient_norm_interval
-                == 0
+                self._aux_gradient_norm_step in self.aux_gradient_norm_steps
+                or (
+                    self.aux_gradient_norm_interval > 0
+                    and self._aux_gradient_norm_step
+                    % self.aux_gradient_norm_interval
+                    == 0
+                )
             )
             self._aux_gradient_norm_step += 1
             if should_log_gradient_norms:
@@ -753,8 +771,52 @@ class AuxLMTask(LMTask):
         if aux_loss is not None:
             metrics["aux_loss"] = aux_loss.detach()
         if aux_metrics:
+            if getattr(self, "aux_metric_profile", "full") == "compact":
+                aux_metrics = {
+                    name: value
+                    for name, value in aux_metrics.items()
+                    if self._keep_compact_aux_metric(name)
+                }
             metrics.update(aux_metrics)
         return metrics
+
+    @staticmethod
+    def _keep_compact_aux_metric(name):
+        core = {
+            "aux/chunk_ce",
+            "aux/discrete_ce",
+            "aux/memory_nll",
+            "aux/terminal_nll",
+            "aux/total",
+            "aux/terminal_reconstruction_mse",
+            "aux/memory_target_second_moment",
+            "aux/memory_estimate_second_moment",
+            "aux/memory_residual_mse",
+            "aux/memory_relative_mse",
+            "aux/memory_relative_rmse",
+            "aux/memory_norm_ratio",
+            "aux/memory_target_estimate_cosine",
+            "aux/memory_target_batch_variance",
+            "aux/memory_estimate_batch_variance",
+            "aux/memory_batch_r2",
+        }
+        if name in core or name.startswith("diagnostic/"):
+            return True
+        if name in {
+            "grad_norm/all/lm",
+            "grad_norm/forward/lm",
+            "grad_norm/all/aux/memory_nll",
+            "grad_norm/forward/aux/memory_nll",
+            "grad_cosine/all/lm_aux/memory_nll",
+            "grad_cosine/forward/lm_aux/memory_nll",
+        }:
+            return True
+        return any(
+            name.startswith(f"{kind}/block/{block}/")
+            and name.endswith(("/lm", "/aux/memory_nll", "/lm_aux/memory_nll"))
+            for kind in ("grad_norm", "grad_cosine")
+            for block in ("backbone", "memory_state", "embedding")
+        )
 
 class ForecastingTask(BaseTask):
 
