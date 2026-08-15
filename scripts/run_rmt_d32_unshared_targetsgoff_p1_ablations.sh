@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# No-retuning component ablations for the selected SG-off pressure-1 recipe.
+# No-retuning component ablations for a locked SG-off pressure recipe.
 set -euo pipefail
 
 python -c 'import os; key=os.environ.get("WANDB_API_KEY", ""); assert key and key != "WANDB_API_KEY", "WANDB_API_KEY secret was not injected"'
@@ -16,13 +16,15 @@ fi
 first_seed="$((157 + 2 * shard))"
 seeds=("$first_seed" "$((first_seed + 1))")
 
-group="${WANDB_GROUP:-rmt-d32-unshared-targetsgoff-p1-ablation-20260815-v1}"
-suffix="${RUN_SUFFIX:-targetsgoff-p1-abl400-v1}"
+pressure_label="${PRESSURE_LABEL:-p1}"
+rho="${RHO:-31.622777}"
+group="${WANDB_GROUP:-rmt-d32-unshared-targetsgoff-${pressure_label}-ablation-20260815-v1}"
+suffix="${RUN_SUFFIX:-targetsgoff-${pressure_label}-abl400-v1}"
 max_epochs="${MAX_EPOCHS:-400}"
 steps_per_epoch=157
 training_steps="$((steps_per_epoch * max_epochs))"
 warmup_steps="$((training_steps / 5))"
-output_root="${OUTPUT_ROOT:-/tmp/rmt-d32-unshared-targetsgoff-p1-ablation}/shard-${shard}"
+output_root="${OUTPUT_ROOT:-/tmp/rmt-d32-unshared-targetsgoff-${pressure_label}-ablation}/shard-${shard}"
 mkdir -p "$output_root"
 gradient_steps="[0,3140,12560,31400,62643]"
 
@@ -67,7 +69,7 @@ common=(
   model.memory_scale_granularity=global
   model.terminal_scale_mode=fixed
   model.terminal_scale_granularity=global
-  model.rho=31.622777
+  model.rho="$rho"
   model.tau=11.925695
   model.observation_noise_std=0.0
   model.generation_noise_std=0.0
@@ -87,7 +89,8 @@ common=(
 )
 
 # Loss flags must not perturb the selected full model's inference path.
-python - <<'PY'
+RHO="$rho" PRESSURE_LABEL="$pressure_label" python - <<'PY'
+import os
 import torch
 from src.models.sequence.rmt_aux import RMTAuxLM
 
@@ -101,7 +104,7 @@ kwargs = dict(
     stop_gradient_memory_target=False, stop_gradient_memory_observation=False,
     memory_observation_gradient_scale=1.0, memory_scale_mode="fixed",
     memory_scale_granularity="global", terminal_scale_mode="fixed",
-    terminal_scale_granularity="global", rho=31.622777, tau=11.925695,
+    terminal_scale_granularity="global", rho=float(os.environ["RHO"]), tau=11.925695,
 )
 flags = [
     dict(use_chunk_loss=True, use_discrete_loss=True, use_memory_loss=True, use_terminal_loss=True),
@@ -121,7 +124,10 @@ states = [model.state_dict() for model in models]
 keys = [key for key in states[0] if key.startswith(prefixes)]
 assert len(keys) == 30, len(keys)
 assert all(torch.equal(states[0][key], state[key]) for state in states[1:] for key in keys)
-print("Verified 30 inference tensors across full and three SG-off p1 ablations")
+print(
+    "Verified 30 inference tensors across full and three SG-off "
+    f"{os.environ['PRESSURE_LABEL']} ablations"
+)
 PY
 
 pids=()
@@ -137,7 +143,7 @@ launch() {
     *) echo "Unknown condition $condition" >&2; exit 2 ;;
   esac
 
-  local name="rmt-d32-stuinv-wd01-targetsgoff-p1-${condition}-s${seed}-${suffix}"
+  local name="rmt-d32-stuinv-wd01-targetsgoff-${pressure_label}-${condition}-s${seed}-${suffix}"
   local wandb_dir="/tmp/wandb/$name"
   mkdir -p "$wandb_dir"
   echo "Launching $name"
@@ -168,7 +174,7 @@ if (( ${#pids[@]} != 6 )); then
   echo "Expected exactly 6 processes, got ${#pids[@]}" >&2
   exit 2
 fi
-echo "SG-off p1 ablation shard $shard launched exactly 6 processes"
+echo "SG-off ${pressure_label} ablation shard $shard launched exactly 6 processes"
 
 status=0
 for index in "${!pids[@]}"; do
