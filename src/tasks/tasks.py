@@ -226,6 +226,22 @@ def auxiliary_gradient_norm_metrics(
             for left_value, right_value in zip(left, right)
         )
 
+    def sum_gradients(groups):
+        return tuple(
+            None
+            if not (
+                present := [
+                    group[index]
+                    for group in groups
+                    if group[index] is not None
+                ]
+            )
+            else present[0]
+            if len(present) == 1
+            else torch.stack(present).sum(dim=0)
+            for index in range(len(parameters))
+        )
+
     def aggregate(values, mask=None):
         selected = [
             value
@@ -297,8 +313,21 @@ def auxiliary_gradient_norm_metrics(
         metrics[f"grad_norm/block/{block}/lm"] = norm(lm_squares, mask)
     component_gradients = {}
     component_squares = {}
-    for name, component in loss_components.items():
-        values = gradients(aux_weight * component)
+    ordered_components = [
+        (name, component)
+        for name, component in loss_components.items()
+        if name != "total"
+    ]
+    if "total" in loss_components:
+        ordered_components.append(("total", loss_components["total"]))
+    for name, component in ordered_components:
+        if name == "total" and component_gradients:
+            # The reported total is the exact sum of the preceding weighted
+            # components. Reuse those gradients instead of another backward
+            # traversal through the same graph.
+            values = sum_gradients(tuple(component_gradients.values()))
+        else:
+            values = gradients(aux_weight * component)
         component_gradients[name] = values
         squares = gradient_squares(values)
         component_squares[name] = squares
@@ -318,7 +347,9 @@ def auxiliary_gradient_norm_metrics(
             metrics[f"grad_cosine/block/{block}/lm_aux/{name}"] = cosine(
                 lm_dots, lm_squares, squares, mask
             )
-    component_names = tuple(component_gradients)
+    component_names = tuple(
+        name for name in component_gradients if name != "total"
+    )
     for left_index, left_name in enumerate(component_names):
         for right_name in component_names[left_index + 1:]:
             pair_name = f"{left_name}__{right_name}"
@@ -435,7 +466,7 @@ class AuxLMTask(LMTask):
 
     def __init__(
         self,
-        aux_weight=1.0,
+        aux_weight=0.1,
         aux_gradient_norm_interval=0,
         aux_gradient_norm_steps=None,
         aux_diagnostic_interval=1,

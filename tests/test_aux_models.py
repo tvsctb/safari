@@ -393,12 +393,17 @@ class AuxTaskMetricTest(unittest.TestCase):
             "shared": model.forward_parameter * model.aux_parameter,
             "aux_only": model.aux_parameter.pow(2),
         }
-        metrics = auxiliary_gradient_norm_metrics(
-            model,
-            lm_loss,
-            components,
-            aux_weight=0.1,
-        )
+        components["total"] = components["shared"] + components["aux_only"]
+        with mock.patch.object(
+            torch.autograd, "grad", wraps=torch.autograd.grad
+        ) as grad:
+            metrics = auxiliary_gradient_norm_metrics(
+                model,
+                lm_loss,
+                components,
+                aux_weight=0.1,
+            )
+        self.assertEqual(grad.call_count, 3)
         torch.testing.assert_close(metrics["grad_norm/forward/lm"], torch.tensor(2.0))
         torch.testing.assert_close(metrics["grad_norm/all/lm"], torch.tensor(2.0))
         torch.testing.assert_close(
@@ -490,6 +495,8 @@ class AuxModelTest(unittest.TestCase):
                 memory_scale_mode="learned",
                 terminal_scale_mode="learned",
                 use_direction_embedding=True,
+                use_terminal_chunk=True,
+                use_terminal_chunk_loss=True,
             ),
         ]
 
@@ -866,6 +873,7 @@ class AuxModelTest(unittest.TestCase):
             model.forward_queries.untyped_storage().data_ptr(),
             model.inverse_queries.untyped_storage().data_ptr(),
         )
+        torch.testing.assert_close(model.forward_queries, model.inverse_queries)
 
     def test_rmt_memory_plus_query_preserves_query_mode_initialization(self):
         torch.manual_seed(23)
@@ -1004,6 +1012,45 @@ class AuxModelTest(unittest.TestCase):
                     )
                 offset += count
 
+    def test_rmt_inverse_positions_are_invariant_to_left_padding(self):
+        torch.manual_seed(31)
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            chunk_size=4,
+            num_memory_tokens=2,
+            dropout=0.0,
+        ).eval()
+        memory = torch.randn(1, 2, 8)
+        valid_tokens = torch.randn(1, 2, 8)
+        short_hidden, short_memory = model._transform(
+            memory,
+            valid_tokens,
+            model.inverse_queries,
+            model.inverse_blocks,
+            model.inverse_final_norm,
+            model.inverse_position_embedding,
+            torch.zeros(1, 2, dtype=torch.bool),
+        )
+        padded_hidden, padded_memory = model._transform(
+            memory,
+            torch.cat((torch.zeros(1, 2, 8), valid_tokens), dim=1),
+            model.inverse_queries,
+            model.inverse_blocks,
+            model.inverse_final_norm,
+            model.inverse_position_embedding,
+            torch.tensor([[True, True, False, False]]),
+        )
+        torch.testing.assert_close(
+            short_hidden, padded_hidden[:, -2:], rtol=1e-5, atol=1e-6
+        )
+        torch.testing.assert_close(
+            short_memory, padded_memory, rtol=1e-5, atol=1e-6
+        )
+
     def test_rmt_default_write_mode_matches_explicit_memory_plus_query_mode(self):
         torch.manual_seed(17)
         default = RMTAuxLM(8, 1, 16, 2, 20, dropout=0.0)
@@ -1091,6 +1138,7 @@ class AuxModelTest(unittest.TestCase):
             vocab_size=20,
             chunk_size=4,
             num_memory_tokens=2,
+            use_terminal_chunk=True,
         )
         sequence_lengths = []
 
@@ -1134,6 +1182,7 @@ class AuxModelTest(unittest.TestCase):
             chunk_size=4,
             num_memory_tokens=2,
             share_inverse=False,
+            use_terminal_chunk=True,
         )
         rmt_inverse_shapes = []
         rmt_handle = rmt.inverse_blocks[0].register_forward_pre_hook(
@@ -1187,6 +1236,11 @@ class AuxModelTest(unittest.TestCase):
         self.assertFalse(hasattr(rmt, "log_rho"))
         self.assertFalse(hasattr(rmt, "log_tau"))
         self.assertEqual(rmt.write_input_mode, "memory_plus_query")
+        self.assertAlmostEqual(float(rmt.rho), 31.622777, places=5)
+        self.assertAlmostEqual(float(rmt.tau), 11.925695, places=5)
+        self.assertIsNotNone(rmt.terminal_target)
+        self.assertFalse(rmt.use_terminal_chunk)
+        self.assertFalse(rmt.use_terminal_chunk_loss)
         self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
         self.assertIsNot(rmt.final_norm, rmt.inverse_final_norm)
         self.assertIsNotNone(rmt.inverse_position_embedding)
@@ -1229,6 +1283,7 @@ class AuxModelTest(unittest.TestCase):
             n_heads=2,
             vocab_size=20,
             share_inverse=False,
+            block_initialization="orthogonal_residual",
         )
         self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
         self.assertIsNot(rmt.final_norm, rmt.inverse_final_norm)
@@ -1242,6 +1297,12 @@ class AuxModelTest(unittest.TestCase):
             rmt.position_embedding.untyped_storage().data_ptr(),
         )
         self.assertFalse(hasattr(rmt, "inverse_head"))
+        for name, value in rmt.blocks.state_dict().items():
+            torch.testing.assert_close(value, rmt.inverse_blocks.state_dict()[name])
+        for name, value in rmt.final_norm.state_dict().items():
+            torch.testing.assert_close(
+                value, rmt.inverse_final_norm.state_dict()[name]
+            )
 
         output, _ = rmt(self.inputs, targets=self.targets, compute_aux=True)
         output.aux_loss.backward()
@@ -1845,6 +1906,7 @@ class AuxModelTest(unittest.TestCase):
             chunk_size=4,
             num_memory_tokens=2,
             token_scheme="role_reverse",
+            use_terminal_chunk=True,
         )
         sequence_lengths = []
         handle = model.blocks[0].register_forward_pre_hook(
@@ -1877,6 +1939,7 @@ class AuxModelTest(unittest.TestCase):
                 vocab_size=20,
                 num_memory_tokens=2,
                 token_scheme="role_reverse",
+                use_terminal_chunk=True,
             ),
         ]
         for model in models:

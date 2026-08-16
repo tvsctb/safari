@@ -61,6 +61,39 @@ class CausalTransformerBlock(nn.Module):
         return x + self.dropout(self.mlp(self.norm2(x)))
 
 
+def positioned_memory_and_tokens(
+    memory,
+    token_embeddings,
+    position_embedding,
+    num_memory_tokens,
+    token_valid=None,
+):
+    """Add compact per-row token positions while keeping read slots fixed."""
+
+    batch_size, token_length = token_embeddings.shape[:2]
+    memory_positions = position_embedding[:num_memory_tokens]
+    if token_valid is None:
+        token_positions = position_embedding[
+            num_memory_tokens : num_memory_tokens + token_length
+        ].unsqueeze(0)
+    else:
+        if token_valid.shape != (batch_size, token_length):
+            raise ValueError(
+                "token_valid must match the token embedding batch and length"
+            )
+        compact_token_index = token_valid.long().cumsum(dim=1).sub_(1)
+        position_index = compact_token_index.add(num_memory_tokens)
+        position_index.clamp_(0, position_embedding.size(0) - 1)
+        token_positions = F.embedding(position_index, position_embedding)
+    return torch.cat(
+        (
+            memory + memory_positions.unsqueeze(0),
+            token_embeddings + token_positions,
+        ),
+        dim=1,
+    )
+
+
 def initialize_position_embedding(parameter, mode, std=0.02):
     if mode == "normal":
         nn.init.normal_(parameter, std=std)
@@ -202,20 +235,20 @@ class RMTAuxLM(nn.Module):
         memory_scale_granularity="global",
         terminal_scale_mode="fixed",
         terminal_scale_granularity="global",
-        rho=1.0,
-        tau=1.0,
+        rho=31.622777,
+        tau=11.925695,
         stop_gradient_memory_target=False,
         stop_gradient_memory_observation=False,
         memory_observation_gradient_scale=1.0,
-        learnable_terminal_target=False,
+        learnable_terminal_target=True,
         observation_noise_std=0.0,
         generation_noise_std=0.0,
-        use_terminal_chunk=True,
+        use_terminal_chunk=False,
         use_chunk_loss=True,
         use_discrete_loss=True,
         use_memory_loss=True,
         use_terminal_loss=True,
-        use_terminal_chunk_loss=True,
+        use_terminal_chunk_loss=False,
         memory_min_scale=1e-4,
         memory_max_scale=1e4,
         terminal_min_scale=1e-4,
@@ -433,12 +466,11 @@ class RMTAuxLM(nn.Module):
             self.embedding_initialization_std,
         )
         nn.init.normal_(self.initial_memory, std=0.02)
-        # Keep the learned write-slot/role embeddings identical across write
-        # modes.  In memory_plus_query mode the only architectural change is
-        # adding the incoming memory to these queries; consuming the same RNG
-        # here also preserves every downstream initialization for paired runs.
+        # Keep write-slot initialization paired across write modes and copy it
+        # into the separately trainable inverse path.
         nn.init.normal_(self.forward_queries, std=0.02)
-        nn.init.normal_(self.inverse_queries, std=0.02)
+        with torch.no_grad():
+            self.inverse_queries.copy_(self.forward_queries)
         initialize_position_embedding(
             self.position_embedding, self.position_initialization
         )
@@ -448,11 +480,11 @@ class RMTAuxLM(nn.Module):
             self.block_initialization_seed,
         )
         if self.inverse_blocks is not self.blocks:
-            initialize_transformer_blocks(
-                self.inverse_blocks,
-                self.block_initialization,
-                self.block_initialization_seed,
-            )
+            # Unshared means separately trainable, not independently initialized.
+            # Initialize the forward path once and copy it exactly so every
+            # inverse parameter starts from its forward counterpart.
+            self.inverse_blocks.load_state_dict(self.blocks.state_dict())
+            self.inverse_final_norm.load_state_dict(self.final_norm.state_dict())
         with torch.no_grad():
             if self.inverse_embedding is not self.embedding:
                 self.inverse_embedding.weight.copy_(self.embedding.weight)
@@ -514,9 +546,20 @@ class RMTAuxLM(nn.Module):
             if position_embedding is None
             else position_embedding
         )
-        positioned_length = self.num_memory_tokens + token_length
-        x = torch.cat((memory, token_embeddings), dim=1)
-        x = x + position_embedding[:positioned_length]
+        if token_padding_mask is not None and token_padding_mask.shape != (
+            batch_size,
+            token_length,
+        ):
+            raise ValueError(
+                "token_padding_mask must match the token embedding batch and length"
+            )
+        x = positioned_memory_and_tokens(
+            memory,
+            token_embeddings,
+            position_embedding,
+            self.num_memory_tokens,
+            None if token_padding_mask is None else ~token_padding_mask,
+        )
         if queries is not None:
             query_batch = queries.unsqueeze(0).expand(batch_size, -1, -1)
             if self.write_input_mode == "memory_plus_query":
@@ -524,10 +567,6 @@ class RMTAuxLM(nn.Module):
             x = torch.cat((x, query_batch), dim=1)
         key_padding_mask = None
         if token_padding_mask is not None:
-            if token_padding_mask.shape != (batch_size, token_length):
-                raise ValueError(
-                    "token_padding_mask must match the token embedding batch and length"
-                )
             memory_padding = torch.zeros(
                 batch_size,
                 self.num_memory_tokens,
