@@ -16,7 +16,7 @@ model:
   n_heads: 1
   vocab_size: ${dataset.vocab_size}
   chunk_size: 4
-  num_memory_tokens: 4
+  num_memory_tokens: 2
   dropout: 0.0
   use_chunk_loss: true
   use_discrete_loss: true

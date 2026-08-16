@@ -101,7 +101,7 @@ class RMTAuxLM(nn.Module):
         n_heads,
         vocab_size,
         chunk_size=4,
-        num_memory_tokens=4,
+        num_memory_tokens=2,
         dropout=0.0,
         rho=31.622777,
         tau=11.925695,
