@@ -496,6 +496,24 @@ class StudyController:
         return results
 
 
+def local_smoke_command(
+    trial: Trial, output_root: Path, train_batches: int, val_batches: int
+) -> List[str]:
+    command = build_command(trial, output_root, "unused", "unused", "unused")
+    replacements = {
+        "+trainer.check_val_every_n_epoch=5": "+trainer.check_val_every_n_epoch=1",
+        "trainer.limit_train_batches=1.0": (
+            f"trainer.limit_train_batches={train_batches}"
+        ),
+        "trainer.limit_val_batches=1.0": f"trainer.limit_val_batches={val_batches}",
+        "task.aux_gradient_norm_interval=1570": "task.aux_gradient_norm_interval=0",
+        "wandb.mode=online": "wandb.mode=disabled",
+        "+wandb.entity=unused": "+wandb.entity=null",
+        "+wandb.resume=allow": "+wandb.resume=null",
+    }
+    return [replacements.get(argument, argument) for argument in command]
+
+
 def run_preflight(output_root: Path, gpu_id: int) -> None:
     """Exercise the real one-GPU train/checkpoint/summary path before fan-out."""
     preflight_root = output_root / "preflight"
@@ -510,16 +528,7 @@ def run_preflight(output_root: Path, gpu_id: int) -> None:
         scale=Scale(1.0, 1.0),
         phase="preflight",
     )
-    command = build_command(trial, preflight_root, "unused", "unused", "unused")
-    replacements = {
-        "+trainer.check_val_every_n_epoch=5": "+trainer.check_val_every_n_epoch=1",
-        "trainer.limit_train_batches=1.0": "trainer.limit_train_batches=2",
-        "trainer.limit_val_batches=1.0": "trainer.limit_val_batches=2",
-        "wandb.mode=online": "wandb.mode=disabled",
-        "+wandb.entity=unused": "+wandb.entity=null",
-        "+wandb.resume=allow": "+wandb.resume=null",
-    }
-    command = [replacements.get(argument, argument) for argument in command]
+    command = local_smoke_command(trial, preflight_root, 2, 2)
     environment = os.environ.copy()
     environment.update(
         {
@@ -546,6 +555,118 @@ def run_preflight(output_root: Path, gpu_id: int) -> None:
     if completed.returncode != 0 or _last_metrics(result) is None or not checkpoint.exists():
         raise RuntimeError(f"GPU preflight failed; inspect {log_path}")
     (preflight_root / "PREFLIGHT_OK").write_text("ok\n", encoding="utf-8")
+
+
+def choose_worker_count(records: Sequence[dict], tolerance: float = 0.02) -> int:
+    viable = [record for record in records if record.get("succeeded")]
+    if not viable:
+        raise RuntimeError("all concurrency benchmark candidates failed")
+    best_throughput = max(record["aggregate_updates_per_second"] for record in viable)
+    near_best = [
+        record
+        for record in viable
+        if record["aggregate_updates_per_second"]
+        >= best_throughput * (1.0 - tolerance)
+    ]
+    return min(int(record["workers_per_gpu"]) for record in near_best)
+
+
+def benchmark_worker_counts(
+    output_root: Path,
+    gpu_ids: Sequence[int],
+    candidates: Sequence[int] = (2, 4, 6, 8),
+) -> int:
+    """Measure whole-host trial throughput and select a safe near-optimal fan-out."""
+    benchmark_root = output_root / "concurrency_benchmark"
+    report_path = benchmark_root / "benchmark.json"
+    if report_path.exists():
+        with report_path.open(encoding="utf-8") as stream:
+            return int(json.load(stream)["selected_workers_per_gpu"])
+    partial_path = benchmark_root / "partial.json"
+    records = []
+    if partial_path.exists():
+        try:
+            with partial_path.open(encoding="utf-8") as stream:
+                records = list(json.load(stream).get("records", []))
+        except (OSError, ValueError, TypeError):
+            records = []
+    completed_candidates = {
+        int(record["workers_per_gpu"]) for record in records
+    }
+    for workers_per_gpu in candidates:
+        if workers_per_gpu in completed_candidates:
+            continue
+        candidate_root = benchmark_root / f"workers-{workers_per_gpu}"
+        if candidate_root.exists():
+            shutil.rmtree(candidate_root)
+        jobs = []
+        for gpu_id in gpu_ids:
+            for worker in range(workers_per_gpu):
+                trial = Trial(
+                    trial_id=f"bench-c{workers_per_gpu}-g{gpu_id}-w{worker}",
+                    seed=20260817 + worker,
+                    max_epochs=2,
+                    aux_weight=0.1,
+                    target_sg=False,
+                    scale=Scale(1.0, 1.0),
+                    phase="benchmark",
+                )
+                command = local_smoke_command(trial, candidate_root, 157, 2)
+                jobs.append((gpu_id, trial, command))
+
+        started = time.monotonic()
+
+        def run_job(job) -> bool:
+            gpu_id, trial, command = job
+            trial_root = candidate_root / "trials" / trial.trial_id
+            trial_root.mkdir(parents=True, exist_ok=True)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "CUDA_VISIBLE_DEVICES": str(gpu_id),
+                    "OMP_NUM_THREADS": "1",
+                    "MKL_NUM_THREADS": "1",
+                }
+            )
+            with (trial_root / "train.log").open("w", encoding="utf-8") as stream:
+                completed = subprocess.run(
+                    command,
+                    cwd=Path(__file__).resolve().parents[1],
+                    env=environment,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+            result = trial_root / "result.json"
+            checkpoint = trial_root / "checkpoints" / "last.ckpt"
+            return (
+                completed.returncode == 0
+                and _last_metrics(result) is not None
+                and checkpoint.exists()
+            )
+
+        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+            job_results = list(executor.map(run_job, jobs))
+            succeeded = all(job_results)
+        elapsed = time.monotonic() - started
+        total_updates = len(jobs) * 2 * STEPS_PER_EPOCH
+        records.append(
+            {
+                "workers_per_gpu": workers_per_gpu,
+                "processes": len(jobs),
+                "elapsed_seconds": elapsed,
+                "total_updates": total_updates,
+                "aggregate_updates_per_second": total_updates / elapsed,
+                "succeeded": succeeded,
+            }
+        )
+        atomic_json(partial_path, {"records": records})
+    selected = choose_worker_count(records)
+    atomic_json(
+        report_path,
+        {"records": records, "selected_workers_per_gpu": selected},
+    )
+    return selected
 
 
 def scale_from_row(row: dict) -> Scale:
@@ -639,7 +760,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--gpu-ids", default="0,1,2,3,4,5,6,7")
-    parser.add_argument("--workers-per-gpu", type=int, default=4)
+    parser.add_argument("--workers-per-gpu", default="auto")
     parser.add_argument("--wandb-project", default="aux-assc-recall")
     parser.add_argument("--wandb-entity", default="bjjin07-x")
     parser.add_argument(
@@ -658,15 +779,6 @@ def main() -> int:
         if shutil.which("nvidia-smi") is None:
             raise RuntimeError("nvidia-smi is unavailable")
     gpu_ids = tuple(int(value) for value in args.gpu_ids.split(",") if value)
-    controller = StudyController(
-        output_root=args.output_root,
-        gpu_ids=gpu_ids,
-        workers_per_gpu=args.workers_per_gpu,
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        group=args.wandb_group,
-        dry_run=args.dry_run,
-    )
 
     if args.dry_run:
         sample = make_screen_trials([Scale(1.0, 1.0)], False)[0]
@@ -690,6 +802,22 @@ def main() -> int:
         return 0
 
     run_preflight(args.output_root, gpu_ids[0])
+    if args.workers_per_gpu == "auto":
+        workers_per_gpu = benchmark_worker_counts(args.output_root, gpu_ids)
+    else:
+        workers_per_gpu = int(args.workers_per_gpu)
+        if workers_per_gpu < 1 or workers_per_gpu > 8:
+            raise ValueError("workers-per-gpu must be auto or an integer in [1, 8]")
+    print(f"Selected {workers_per_gpu} concurrent trials per GPU", flush=True)
+    controller = StudyController(
+        output_root=args.output_root,
+        gpu_ids=gpu_ids,
+        workers_per_gpu=workers_per_gpu,
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        group=args.wandb_group,
+        dry_run=False,
+    )
 
     baseline_trials = make_baseline_trials()
     baseline_result = {}

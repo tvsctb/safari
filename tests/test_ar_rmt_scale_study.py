@@ -83,6 +83,31 @@ class ArRMTScaleStudyTest(unittest.TestCase):
             len(study.make_screen_trials(study.initial_scales(), False)), 18
         )
 
+    def test_concurrency_selector_prefers_lower_near_tie(self):
+        records = [
+            {
+                "workers_per_gpu": 2,
+                "aggregate_updates_per_second": 10.0,
+                "succeeded": True,
+            },
+            {
+                "workers_per_gpu": 4,
+                "aggregate_updates_per_second": 11.0,
+                "succeeded": True,
+            },
+            {
+                "workers_per_gpu": 6,
+                "aggregate_updates_per_second": 11.1,
+                "succeeded": True,
+            },
+            {
+                "workers_per_gpu": 8,
+                "aggregate_updates_per_second": 20.0,
+                "succeeded": False,
+            },
+        ]
+        self.assertEqual(study.choose_worker_count(records), 4)
+
 
 if __name__ == "__main__":
     unittest.main()
