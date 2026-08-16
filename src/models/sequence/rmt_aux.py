@@ -194,6 +194,7 @@ class RMTAuxLM(nn.Module):
         block_initialization_seed=None,
         embedding_initialization="normal",
         embedding_initialization_std=0.02,
+        write_input_mode="query",
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
@@ -290,6 +291,11 @@ class RMTAuxLM(nn.Module):
         if embedding_initialization_std <= 0:
             raise ValueError("embedding_initialization_std must be positive")
         self.embedding_initialization_std = embedding_initialization_std
+        if write_input_mode not in {"query", "memory_plus_query"}:
+            raise ValueError(
+                "write_input_mode must be query or memory_plus_query"
+            )
+        self.write_input_mode = write_input_mode
         self.share_inverse_embedding = share_inverse_embedding
         self.share_inverse_head = share_inverse_head
         self.use_direction_embedding = resolve_direction_embedding(
@@ -427,8 +433,12 @@ class RMTAuxLM(nn.Module):
             self.embedding_initialization_std,
         )
         nn.init.normal_(self.initial_memory, std=0.02)
-        nn.init.normal_(self.forward_queries, std=0.02)
-        nn.init.normal_(self.inverse_queries, std=0.02)
+        if self.write_input_mode == "memory_plus_query":
+            nn.init.zeros_(self.forward_queries)
+            nn.init.zeros_(self.inverse_queries)
+        else:
+            nn.init.normal_(self.forward_queries, std=0.02)
+            nn.init.normal_(self.inverse_queries, std=0.02)
         initialize_position_embedding(
             self.position_embedding, self.position_initialization
         )
@@ -508,6 +518,8 @@ class RMTAuxLM(nn.Module):
         x = x + position_embedding[:positioned_length]
         if queries is not None:
             query_batch = queries.unsqueeze(0).expand(batch_size, -1, -1)
+            if self.write_input_mode == "memory_plus_query":
+                query_batch = memory + query_batch
             x = torch.cat((x, query_batch), dim=1)
         sequence_length = x.size(1)
         mask = self.causal_mask[:sequence_length, :sequence_length]

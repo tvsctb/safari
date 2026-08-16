@@ -855,6 +855,109 @@ class AuxModelTest(unittest.TestCase):
             model.inverse_queries.untyped_storage().data_ptr(),
         )
 
+    def test_rmt_memory_plus_query_write_offsets_start_at_zero(self):
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            chunk_size=4,
+            num_memory_tokens=2,
+            write_input_mode="memory_plus_query",
+        )
+        torch.testing.assert_close(
+            model.forward_queries, torch.zeros_like(model.forward_queries)
+        )
+        torch.testing.assert_close(
+            model.inverse_queries, torch.zeros_like(model.inverse_queries)
+        )
+
+    def test_rmt_memory_plus_query_copies_memory_into_both_write_paths(self):
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            chunk_size=4,
+            num_memory_tokens=2,
+            write_input_mode="memory_plus_query",
+            share_inverse=False,
+        )
+        memory = torch.arange(16, dtype=torch.float32).reshape(1, 2, 8)
+        with torch.no_grad():
+            model.forward_queries.copy_(
+                torch.arange(16, 32, dtype=torch.float32).reshape(2, 8)
+            )
+            model.inverse_queries.copy_(
+                torch.arange(32, 48, dtype=torch.float32).reshape(2, 8)
+            )
+
+        for queries, blocks, final_norm, position_embedding in (
+            (model.forward_queries, model.blocks, model.final_norm, None),
+            (
+                model.inverse_queries,
+                model.inverse_blocks,
+                model.inverse_final_norm,
+                model.inverse_position_embedding,
+            ),
+        ):
+            captured = []
+            handle = blocks[0].register_forward_pre_hook(
+                lambda module, args: captured.append(args[0].detach().clone())
+            )
+            try:
+                model._transform(
+                    memory,
+                    torch.zeros(1, 4, 8),
+                    queries,
+                    blocks,
+                    final_norm,
+                    position_embedding,
+                )
+            finally:
+                handle.remove()
+
+            torch.testing.assert_close(
+                captured[0][:, -2:],
+                memory + queries.unsqueeze(0),
+            )
+
+    def test_rmt_default_write_mode_matches_explicit_legacy_mode(self):
+        torch.manual_seed(17)
+        default = RMTAuxLM(8, 1, 16, 2, 20, dropout=0.0)
+        torch.manual_seed(17)
+        explicit = RMTAuxLM(
+            8,
+            1,
+            16,
+            2,
+            20,
+            dropout=0.0,
+            write_input_mode="query",
+        )
+        default.eval()
+        explicit.eval()
+        inputs = torch.arange(12).reshape(2, 6) % 20
+        for name, value in default.state_dict().items():
+            self.assertTrue(torch.equal(value, explicit.state_dict()[name]), name)
+        default_output, default_state = default(inputs, compute_aux=False)
+        explicit_output, explicit_state = explicit(inputs, compute_aux=False)
+        self.assertTrue(torch.equal(default_output.logits, explicit_output.logits))
+        self.assertTrue(torch.equal(default_state, explicit_state))
+
+    def test_rmt_rejects_unknown_write_input_mode(self):
+        with self.assertRaisesRegex(ValueError, "write_input_mode"):
+            RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                write_input_mode="unknown",
+            )
+
     def test_rmt_queries_do_not_receive_position_embeddings(self):
         model = RMTAuxLM(
             d_model=8,
