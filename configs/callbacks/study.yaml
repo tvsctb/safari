@@ -1,0 +1,26 @@
+learning_rate_monitor:
+  logging_interval: ${train.interval}
+
+timer:
+  step: true
+  inter_step: false
+  epoch: true
+  val: true
+
+params:
+  total: true
+  trainable: true
+  fixed: true
+
+model_checkpoint:
+  monitor: ${train.monitor}
+  mode: ${train.mode}
+  save_top_k: 1
+  save_last: true
+  dirpath: checkpoints/
+  filename: best
+  auto_insert_metric_name: false
+  verbose: true
+
+study_summary:
+  result_path: ???

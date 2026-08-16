@@ -52,4 +52,5 @@ callbacks = {
     "rich_model_summary": "pytorch_lightning.callbacks.RichModelSummary",
     "rich_progress_bar": "pytorch_lightning.callbacks.RichProgressBar",
     "progressive_resizing": "src.callbacks.progressive_resizing.ProgressiveResizing",
+    "study_summary": "src.callbacks.study_summary.StudySummary",
 }
