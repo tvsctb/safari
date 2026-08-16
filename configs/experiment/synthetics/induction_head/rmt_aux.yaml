@@ -39,7 +39,7 @@ model:
   use_discrete_loss: true
   use_memory_loss: true
   rho: 31.622777
-  stop_gradient_memory_target: true
+  stop_gradient_memory_target: false
   stop_gradient_memory_observation: false
   memory_observation_gradient_scale: 1.0
   use_terminal_loss: true
