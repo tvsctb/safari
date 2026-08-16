@@ -47,7 +47,8 @@ model:
   use_memory_loss: true
   memory_scale_mode: fixed
   memory_scale_granularity: global  # global | slotwise
-  rho: 1.0
+  # Neutral center of the architecture-specific rho pressure screen.
+  rho: 31.622777
   memory_min_scale: 1e-4
   memory_max_scale: 1e4
   stop_gradient_memory_target: false
@@ -56,12 +57,13 @@ model:
   use_terminal_loss: true
   terminal_scale_mode: fixed
   terminal_scale_granularity: global  # global | slotwise
-  tau: 10.0
+  # Neutral center of the architecture-specific tau pressure screen.
+  tau: 11.925695
   terminal_min_scale: 1e-4
   terminal_max_scale: 1e4
-  learnable_terminal_target: false
-  use_terminal_chunk: true
-  use_terminal_chunk_loss: true
+  learnable_terminal_target: true
+  use_terminal_chunk: false
+  use_terminal_chunk_loss: false
 
 task:
   _name_: aux_lm
