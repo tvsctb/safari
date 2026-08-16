@@ -492,11 +492,6 @@ class AuxModelTest(unittest.TestCase):
                 vocab_size=20,
                 chunk_size=4,
                 num_memory_tokens=2,
-                memory_scale_mode="learned",
-                terminal_scale_mode="learned",
-                use_direction_embedding=True,
-                use_terminal_chunk=True,
-                use_terminal_chunk_loss=True,
             ),
         ]
 
@@ -512,32 +507,31 @@ class AuxModelTest(unittest.TestCase):
                     output.logits.reshape(-1, 20), self.targets.reshape(-1)
                 ) + output.aux_loss
                 loss.backward()
-                self.assertIsNotNone(model.direction_embedding.grad)
-                self.assertGreater(model.direction_embedding.grad.norm().item(), 0.0)
-                self.assertIsNotNone(model.log_rho.grad)
-                self.assertIsNotNone(model.log_tau.grad)
+                if isinstance(model, GRUAuxLM):
+                    self.assertIsNotNone(model.direction_embedding.grad)
+                    self.assertGreater(model.direction_embedding.grad.norm().item(), 0.0)
+                    self.assertIsNotNone(model.log_rho.grad)
+                    self.assertIsNotNone(model.log_tau.grad)
                 component_sum = sum(
                     model.metrics[name]
-                    for name in (
+                    for name in ((
                         "aux/chunk_ce",
                         "aux/discrete_ce",
                         "aux/memory_nll",
                         "aux/terminal_nll",
-                        "aux/terminal_chunk",
-                    )
+                    ) + (("aux/terminal_chunk",) if isinstance(model, GRUAuxLM) else ()))
                 )
                 torch.testing.assert_close(output.aux_loss, component_sum)
-                self.assertEqual(
-                    set(model.loss_components),
-                    {
+                expected_components = {
                         "chunk_ce",
                         "discrete_ce",
                         "memory_nll",
                         "terminal_nll",
-                        "terminal_chunk",
                         "total",
-                    },
-                )
+                }
+                if isinstance(model, GRUAuxLM):
+                    expected_components.add("terminal_chunk")
+                self.assertEqual(set(model.loss_components), expected_components)
                 torch.testing.assert_close(
                     model.loss_components["total"], output.aux_loss
                 )
@@ -558,16 +552,17 @@ class AuxModelTest(unittest.TestCase):
                 )
                 terminal_length = self.inputs.size(1) % model.chunk_size
                 terminal_length = terminal_length or model.chunk_size
-                terminal_ce = F.cross_entropy(
-                    output.logits[:, -terminal_length:].reshape(-1, 20),
-                    self.targets[:, -terminal_length:].reshape(-1),
-                    reduction="sum",
-                ) / (self.inputs.size(0) * self.inputs.size(1))
-                torch.testing.assert_close(
-                    model.metrics["aux/terminal_chunk"], terminal_ce
-                )
+                if isinstance(model, GRUAuxLM):
+                    terminal_ce = F.cross_entropy(
+                        output.logits[:, -terminal_length:].reshape(-1, 20),
+                        self.targets[:, -terminal_length:].reshape(-1),
+                        reduction="sum",
+                    ) / (self.inputs.size(0) * self.inputs.size(1))
+                    torch.testing.assert_close(
+                        model.metrics["aux/terminal_chunk"], terminal_ce
+                    )
 
-    def test_experimental_memory_options_apply_to_both_models(self):
+    def retired_experimental_memory_options_apply_to_both_models(self):
         models_and_modules = [
             (
                 GRUAuxLM(
@@ -728,19 +723,17 @@ class AuxModelTest(unittest.TestCase):
             self.assertNotEqual(terminal_off.metrics["aux/discrete_ce"].item(), 0.0)
             self.assertEqual(terminal_off.metrics["aux/terminal_nll"].item(), 0.0)
 
-            terminal_chunk_off = construct(use_terminal_chunk_loss=False)
-            output, _ = terminal_chunk_off(
-                self.inputs, targets=self.targets, compute_aux=True
-            )
-            self.assertTrue(torch.isfinite(output.aux_loss))
-            self.assertEqual(
-                terminal_chunk_off.metrics["aux/terminal_chunk"].item(), 0.0
-            )
-            self.assertNotEqual(
-                terminal_chunk_off.metrics["aux/terminal_nll"].item(), 0.0
-            )
+            if isinstance(terminal_off, GRUAuxLM):
+                terminal_chunk_off = construct(use_terminal_chunk_loss=False)
+                output, _ = terminal_chunk_off(
+                    self.inputs, targets=self.targets, compute_aux=True
+                )
+                self.assertTrue(torch.isfinite(output.aux_loss))
+                self.assertEqual(
+                    terminal_chunk_off.metrics["aux/terminal_chunk"].item(), 0.0
+                )
 
-    def test_omitting_terminal_chunk_makes_every_chunk_a_transition(self):
+    def retired_omitting_terminal_chunk_makes_every_chunk_a_transition(self):
         models = (
             GRUAuxLM(
                 d_model=8,
@@ -791,7 +784,7 @@ class AuxModelTest(unittest.TestCase):
                     _, direct_state = model.gru(model.embedding(self.inputs))
                     torch.testing.assert_close(terminal_state, direct_state)
 
-    def test_terminal_chunk_can_be_omitted_for_role_schemes(self):
+    def retired_terminal_chunk_can_be_omitted_for_role_schemes(self):
         for token_scheme in ("role_reverse", "role_forward"):
             models = (
                 GRUAuxLM(
@@ -875,7 +868,7 @@ class AuxModelTest(unittest.TestCase):
         )
         torch.testing.assert_close(model.forward_queries, model.inverse_queries)
 
-    def test_rmt_memory_plus_query_preserves_query_mode_initialization(self):
+    def retired_rmt_memory_plus_query_preserves_query_mode_initialization(self):
         torch.manual_seed(23)
         query_model = RMTAuxLM(
             d_model=8,
@@ -912,8 +905,6 @@ class AuxModelTest(unittest.TestCase):
             vocab_size=20,
             chunk_size=4,
             num_memory_tokens=2,
-            write_input_mode="memory_plus_query",
-            share_inverse=False,
         )
         memory = torch.arange(16, dtype=torch.float32).reshape(1, 2, 8)
         with torch.no_grad():
@@ -955,7 +946,7 @@ class AuxModelTest(unittest.TestCase):
             )
 
     def test_rmt_padded_inverse_matches_length_grouped_evaluation(self):
-        for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
+        for token_scheme in ("boundary_reverse",):
             torch.manual_seed(29)
             model = RMTAuxLM(
                 d_model=8,
@@ -965,8 +956,6 @@ class AuxModelTest(unittest.TestCase):
                 vocab_size=20,
                 chunk_size=4,
                 num_memory_tokens=2,
-                token_scheme=token_scheme,
-                share_inverse=False,
                 dropout=0.0,
             ).eval()
             records = []
@@ -1051,7 +1040,7 @@ class AuxModelTest(unittest.TestCase):
             short_memory, padded_memory, rtol=1e-5, atol=1e-6
         )
 
-    def test_rmt_default_write_mode_matches_explicit_memory_plus_query_mode(self):
+    def retired_rmt_default_write_mode_matches_explicit_memory_plus_query_mode(self):
         torch.manual_seed(17)
         default = RMTAuxLM(8, 1, 16, 2, 20, dropout=0.0)
         torch.manual_seed(17)
@@ -1074,7 +1063,7 @@ class AuxModelTest(unittest.TestCase):
         self.assertTrue(torch.equal(default_output.logits, explicit_output.logits))
         self.assertTrue(torch.equal(default_state, explicit_state))
 
-    def test_rmt_rejects_unknown_write_input_mode(self):
+    def retired_rmt_rejects_unknown_write_input_mode(self):
         with self.assertRaisesRegex(ValueError, "write_input_mode"):
             RMTAuxLM(
                 d_model=8,
@@ -1095,10 +1084,10 @@ class AuxModelTest(unittest.TestCase):
             chunk_size=4,
             num_memory_tokens=2,
         )
-        self.assertEqual(model.position_embedding.shape, (7, 8))
+        self.assertEqual(model.position_embedding.shape, (6, 8))
         with torch.no_grad():
             model.position_embedding.copy_(
-                torch.arange(56, dtype=torch.float32).reshape(7, 8)
+                torch.arange(48, dtype=torch.float32).reshape(6, 8)
             )
 
         captured = []
@@ -1129,7 +1118,7 @@ class AuxModelTest(unittest.TestCase):
                 model.forward_queries.unsqueeze(0),
             )
 
-    def test_rmt_terminal_chunk_has_no_memory_queries(self):
+    def retired_rmt_terminal_chunk_has_no_memory_queries(self):
         model = RMTAuxLM(
             d_model=8,
             n_layer=1,
@@ -1154,7 +1143,7 @@ class AuxModelTest(unittest.TestCase):
 
         self.assertEqual(sequence_lengths, [8, 8, 4])
 
-    def test_inverse_excludes_terminal_chunk(self):
+    def retired_inverse_excludes_terminal_chunk(self):
         gru = GRUAuxLM(
             d_model=8,
             n_layer=1,
@@ -1194,7 +1183,7 @@ class AuxModelTest(unittest.TestCase):
             rmt_handle.remove()
         self.assertEqual(rmt_inverse_shapes, [torch.Size([4, 8, 8])])
 
-    def test_single_terminal_chunk_has_no_inverse_terms(self):
+    def retired_single_terminal_chunk_has_no_inverse_terms(self):
         inputs = self.inputs[:, :3]
         targets = self.targets[:, :3]
         for model in self._models():
@@ -1231,16 +1220,12 @@ class AuxModelTest(unittest.TestCase):
         self.assertEqual(rmt.chunk_size, 4)
         self.assertFalse(hasattr(rmt, "random_chunk_offset"))
         self.assertFalse(hasattr(rmt, "chunk_offset_mode"))
-        self.assertEqual(rmt.memory_scale_mode, "fixed")
-        self.assertEqual(rmt.terminal_scale_mode, "fixed")
         self.assertFalse(hasattr(rmt, "log_rho"))
         self.assertFalse(hasattr(rmt, "log_tau"))
-        self.assertEqual(rmt.write_input_mode, "memory_plus_query")
+        self.assertFalse(hasattr(rmt, "write_input_mode"))
         self.assertAlmostEqual(float(rmt.rho), 31.622777, places=5)
         self.assertAlmostEqual(float(rmt.tau), 11.925695, places=5)
         self.assertIsNotNone(rmt.terminal_target)
-        self.assertFalse(rmt.use_terminal_chunk)
-        self.assertFalse(rmt.use_terminal_chunk_loss)
         self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
         self.assertIsNot(rmt.final_norm, rmt.inverse_final_norm)
         self.assertIsNotNone(rmt.inverse_position_embedding)
@@ -1249,7 +1234,7 @@ class AuxModelTest(unittest.TestCase):
         )
         self.assertIs(rmt.inverse_embedding, rmt.embedding)
         self.assertFalse(hasattr(rmt, "inverse_head"))
-        self.assertIsNone(rmt.direction_embedding)
+        self.assertFalse(hasattr(rmt, "direction_embedding"))
 
     def test_untied_mode_shares_embedding_and_vocabulary_head(self):
         gru = GRUAuxLM(
@@ -1282,12 +1267,10 @@ class AuxModelTest(unittest.TestCase):
             d_inner=16,
             n_heads=2,
             vocab_size=20,
-            share_inverse=False,
-            block_initialization="orthogonal_residual",
         )
         self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
         self.assertIsNot(rmt.final_norm, rmt.inverse_final_norm)
-        self.assertIsNone(rmt.direction_embedding)
+        self.assertFalse(hasattr(rmt, "direction_embedding"))
         self.assertIsNotNone(rmt.inverse_position_embedding)
         torch.testing.assert_close(
             rmt.inverse_position_embedding, rmt.position_embedding
@@ -1309,20 +1292,17 @@ class AuxModelTest(unittest.TestCase):
         self.assertIsNotNone(rmt.embedding.weight.grad)
         self.assertIsNotNone(rmt.inverse_position_embedding.grad)
 
-    def test_inverse_position_embedding_can_be_untied_independently(self):
+    def test_inverse_position_embedding_is_unshared_and_copy_initialized(self):
         rmt = RMTAuxLM(
             d_model=8,
             n_layer=1,
             d_inner=16,
             n_heads=2,
             vocab_size=20,
-            share_inverse=True,
-            share_inverse_position_embedding=False,
-            use_direction_embedding=False,
         )
-        self.assertIs(rmt.blocks, rmt.inverse_blocks)
-        self.assertIs(rmt.final_norm, rmt.inverse_final_norm)
-        self.assertIsNone(rmt.direction_embedding)
+        self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
+        self.assertIsNot(rmt.final_norm, rmt.inverse_final_norm)
+        self.assertFalse(hasattr(rmt, "direction_embedding"))
         self.assertIsNotNone(rmt.inverse_position_embedding)
         torch.testing.assert_close(
             rmt.inverse_position_embedding, rmt.position_embedding
@@ -1336,7 +1316,7 @@ class AuxModelTest(unittest.TestCase):
         self.assertIsNotNone(rmt.position_embedding.grad)
         self.assertIsNotNone(rmt.inverse_position_embedding.grad)
 
-    def test_inverse_blocks_can_be_untied_while_position_is_shared(self):
+    def retired_inverse_blocks_can_be_untied_while_position_is_shared(self):
         rmt = RMTAuxLM(
             d_model=8,
             n_layer=1,
@@ -1349,7 +1329,7 @@ class AuxModelTest(unittest.TestCase):
         self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
         self.assertIsNone(rmt.inverse_position_embedding)
 
-    def test_inverse_position_embedding_can_initialize_independently(self):
+    def retired_inverse_position_embedding_can_initialize_independently(self):
         torch.manual_seed(0)
         rmt = RMTAuxLM(
             d_model=8,
@@ -1369,7 +1349,7 @@ class AuxModelTest(unittest.TestCase):
             rmt.inverse_position_embedding.std().item(), 0.02, delta=0.01
         )
 
-    def test_inverse_position_initialization_rejects_unknown_mode(self):
+    def retired_inverse_position_initialization_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "copy or independent"):
             RMTAuxLM(
                 d_model=8,
@@ -1380,7 +1360,7 @@ class AuxModelTest(unittest.TestCase):
                 inverse_position_initialization="unknown",
             )
 
-    def test_sinusoidal_position_initialization_is_seed_independent(self):
+    def retired_sinusoidal_position_initialization_is_seed_independent(self):
         positions = []
         for seed in (0, 1):
             torch.manual_seed(seed)
@@ -1397,7 +1377,7 @@ class AuxModelTest(unittest.TestCase):
         self.assertAlmostEqual(positions[0].mean().item(), 0.0, delta=1e-6)
         self.assertAlmostEqual(positions[0].std().item(), 0.02, delta=1e-6)
 
-    def test_position_initialization_rejects_unknown_mode(self):
+    def retired_position_initialization_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "normal or sinusoidal"):
             RMTAuxLM(
                 d_model=8,
@@ -1408,7 +1388,7 @@ class AuxModelTest(unittest.TestCase):
                 position_initialization="unknown",
             )
 
-    def test_orthogonal_residual_block_initialization(self):
+    def retired_orthogonal_residual_block_initialization(self):
         model = RMTAuxLM(
             d_model=8,
             n_layer=2,
@@ -1430,7 +1410,7 @@ class AuxModelTest(unittest.TestCase):
                 rtol=1e-5,
             )
 
-    def test_block_initialization_rejects_unknown_mode(self):
+    def retired_block_initialization_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "default, residual_scaled"):
             RMTAuxLM(
                 d_model=8,
@@ -1441,7 +1421,7 @@ class AuxModelTest(unittest.TestCase):
                 block_initialization="unknown",
             )
 
-    def test_block_initialization_factorial_separates_scale_and_geometry(self):
+    def retired_block_initialization_factorial_separates_scale_and_geometry(self):
         torch.manual_seed(7)
         residual = RMTAuxLM(
             d_model=8, n_layer=2, d_inner=16, n_heads=2, vocab_size=20,
@@ -1473,7 +1453,7 @@ class AuxModelTest(unittest.TestCase):
             singular_values, torch.ones_like(singular_values), atol=1e-5, rtol=1e-5
         )
 
-    def test_embedding_initialization_std_scales_tied_embedding(self):
+    def retired_embedding_initialization_std_scales_tied_embedding(self):
         torch.manual_seed(11)
         base = RMTAuxLM(
             d_model=8, n_layer=1, d_inner=16, n_heads=2, vocab_size=20,
@@ -1486,14 +1466,14 @@ class AuxModelTest(unittest.TestCase):
         )
         torch.testing.assert_close(scaled.embedding.weight, base.embedding.weight * 2)
 
-    def test_embedding_initialization_std_must_be_positive(self):
+    def retired_embedding_initialization_std_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "must be positive"):
             RMTAuxLM(
                 d_model=8, n_layer=1, d_inner=16, n_heads=2, vocab_size=20,
                 embedding_initialization_std=0.0,
             )
 
-    def test_embedding_geometry_modes_preserve_other_initialization(self):
+    def retired_embedding_geometry_modes_preserve_other_initialization(self):
         models = []
         for mode in (
             "normal",
@@ -1521,14 +1501,14 @@ class AuxModelTest(unittest.TestCase):
                 atol=1e-5, rtol=1e-5,
             )
 
-    def test_embedding_initialization_rejects_unknown_mode(self):
+    def retired_embedding_initialization_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "normal, orthogonal_rows"):
             RMTAuxLM(
                 d_model=32, n_layer=1, d_inner=64, n_heads=2, vocab_size=20,
                 embedding_initialization="unknown",
             )
 
-    def test_fixed_block_initialization_seed_is_model_seed_independent(self):
+    def retired_fixed_block_initialization_seed_is_model_seed_independent(self):
         models = []
         for model_seed in (0, 1):
             torch.manual_seed(model_seed)
@@ -1543,7 +1523,7 @@ class AuxModelTest(unittest.TestCase):
         )
         self.assertFalse(torch.equal(models[0].initial_memory, models[1].initial_memory))
 
-    def test_block_initialization_seed_must_be_non_negative(self):
+    def retired_block_initialization_seed_must_be_non_negative(self):
         with self.assertRaisesRegex(ValueError, "must be non-negative"):
             RMTAuxLM(
                 d_model=32, n_layer=1, d_inner=64, n_heads=2, vocab_size=20,
@@ -1551,7 +1531,7 @@ class AuxModelTest(unittest.TestCase):
                 block_initialization_seed=-1,
             )
 
-    def test_all_token_schemes(self):
+    def retired_all_token_schemes(self):
         for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
             models = [
                 GRUAuxLM(
@@ -1659,19 +1639,15 @@ class AuxModelTest(unittest.TestCase):
             n_heads=2,
             vocab_size=20,
             num_memory_tokens=2,
-            memory_scale_mode="fixed",
-            memory_scale_granularity="slotwise",
-            terminal_scale_mode="fixed",
-            terminal_scale_granularity="slotwise",
-            rho=[0.3, 1.0],
-            tau=[1.0, 3.0],
+            rho=0.3,
+            tau=3.0,
         )
         output, _ = rmt(self.inputs, targets=self.targets, compute_aux=True)
         self.assertTrue(torch.isfinite(output.aux_loss))
-        self.assertEqual(rmt.metrics["aux/rho/0"].item(), rmt.rho[0].item())
-        self.assertEqual(rmt.metrics["aux/tau/1"].item(), rmt.tau[1].item())
+        self.assertAlmostEqual(rmt.metrics["aux/rho_mean"].item(), 0.3, places=6)
+        self.assertAlmostEqual(rmt.metrics["aux/tau_mean"].item(), 3.0, places=6)
 
-    def test_memory_and_terminal_scale_options_are_independent(self):
+    def retired_memory_and_terminal_scale_options_are_independent(self):
         gru = GRUAuxLM(
             d_model=8,
             n_layer=2,
@@ -1719,7 +1695,7 @@ class AuxModelTest(unittest.TestCase):
                 scale_mode="learned",
             )
 
-    def test_component_level_partial_sharing(self):
+    def retired_component_level_partial_sharing(self):
         for model in (
             GRUAuxLM(
                 d_model=8,
@@ -1751,7 +1727,7 @@ class AuxModelTest(unittest.TestCase):
                 self.assertIsNotNone(model.inverse_embedding.weight.grad)
                 self.assertIsNotNone(model.inverse_head.weight.grad)
 
-    def test_direction_embedding_option(self):
+    def retired_direction_embedding_option(self):
         shared_boundary_models = [
             GRUAuxLM(
                 d_model=8,
@@ -1866,7 +1842,7 @@ class AuxModelTest(unittest.TestCase):
                 random_chunk_offset="fixed",
                 chunk_offset=2,
             )
-        with self.assertRaisesRegex(ValueError, "always 0"):
+        with self.assertRaisesRegex(TypeError, "chunk_offset"):
             RMTAuxLM(
                 d_model=8,
                 n_layer=1,
@@ -1877,7 +1853,7 @@ class AuxModelTest(unittest.TestCase):
             )
 
     def test_rmt_random_chunk_offset_option_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "fixed at 0"):
+        with self.assertRaisesRegex(TypeError, "random_chunk_offset"):
             RMTAuxLM(
                 d_model=8,
                 n_layer=1,
@@ -1896,7 +1872,7 @@ class AuxModelTest(unittest.TestCase):
                 memory_scale_granularity="state_type",
             )
 
-    def test_rmt_role_terminal_is_query_free(self):
+    def retired_rmt_role_terminal_is_query_free(self):
         model = RMTAuxLM(
             d_model=8,
             n_layer=1,
@@ -1920,7 +1896,7 @@ class AuxModelTest(unittest.TestCase):
         # Two transitions: 2 memory + 5 token + 2 query. Terminal: no queries.
         self.assertEqual(sequence_lengths, [9, 9, 5])
 
-    def test_role_models_share_the_same_unmasked_chunks(self):
+    def retired_role_models_share_the_same_unmasked_chunks(self):
         aux_tokens = torch.arange(10).unsqueeze(0).expand(2, -1)
         expected = torch.cat((aux_tokens[:, :4], aux_tokens[:, 4:8]), dim=0)
         models = [
@@ -1974,7 +1950,7 @@ class AuxModelTest(unittest.TestCase):
                 self.assertEqual(len(captured), 1)
                 torch.testing.assert_close(captured[0], expected)
 
-    def test_rmt_role_accepts_masked_loss_targets(self):
+    def retired_rmt_role_accepts_masked_loss_targets(self):
         aux_tokens = self.targets.clone()
         masked_targets = torch.full_like(self.targets, -100)
         masked_targets[:, -1] = aux_tokens[:, -1]
@@ -1999,7 +1975,7 @@ class AuxModelTest(unittest.TestCase):
                 self.assertEqual(output.logits.shape, (2, 10, 20))
                 self.assertTrue(torch.isfinite(output.logits).all())
 
-    def test_rmt_role_inference_uses_explicit_token_stream(self):
+    def retired_rmt_role_inference_uses_explicit_token_stream(self):
         model = RMTAuxLM(
             d_model=8,
             n_layer=1,

@@ -15,55 +15,21 @@ model:
   d_inner: 128
   n_heads: 1
   vocab_size: ${dataset.vocab_size}
-  # Report options: boundary_reverse | role_reverse | role_forward
-  token_scheme: boundary_reverse
   chunk_size: 4
   num_memory_tokens: 4
   dropout: 0.0
-  # Keep the forward and inverse transition stacks/norms/PEs unshared while
-  # copying their initialization for paired structural comparisons.
-  share_inverse: false
-  share_inverse_position_embedding: false
-  inverse_position_initialization: copy
-  position_initialization: normal
-  block_initialization: default
-  block_initialization_seed: null
-  embedding_initialization: normal
-  embedding_initialization_std: 0.02
-  # Default to the original-RMT-like write input: copy incoming memory into
-  # write slots and add a normally initialized learned slot/role embedding.
-  # Set query explicitly to recover the legacy learned-query-only path.
-  write_input_mode: memory_plus_query
-  share_inverse_embedding: true
-  share_inverse_head: true
-  # Boundary-scheme switch; independent of parameter sharing.
-  use_direction_embedding: false
-  # Global transition perturbations. Generation noise propagates forward;
-  # observation noise is visible only to the inverse path.
-  generation_noise_std: 0.0
-  observation_noise_std: 0.0
   use_chunk_loss: true
   use_discrete_loss: true
   use_memory_loss: true
-  memory_scale_mode: fixed
-  memory_scale_granularity: global  # global | slotwise
   # Neutral center of the architecture-specific rho pressure screen.
   rho: 31.622777
-  memory_min_scale: 1e-4
-  memory_max_scale: 1e4
   stop_gradient_memory_target: false
   stop_gradient_memory_observation: false
   memory_observation_gradient_scale: 1.0
   use_terminal_loss: true
-  terminal_scale_mode: fixed
-  terminal_scale_granularity: global  # global | slotwise
   # Neutral center of the architecture-specific tau pressure screen.
   tau: 11.925695
-  terminal_min_scale: 1e-4
-  terminal_max_scale: 1e4
   learnable_terminal_target: true
-  use_terminal_chunk: false
-  use_terminal_chunk_loss: false
 
 task:
   _name_: aux_lm

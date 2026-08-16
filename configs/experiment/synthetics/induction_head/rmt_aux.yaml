@@ -32,43 +32,19 @@ model:
   d_inner: 128
   n_heads: 1
   vocab_size: ${dataset.vocab_size}
-  token_scheme: boundary_reverse
   chunk_size: 4
   num_memory_tokens: 4
   dropout: 0.0
-  share_inverse: false
-  share_inverse_position_embedding: false
-  inverse_position_initialization: copy
-  position_initialization: normal
-  block_initialization: default
-  block_initialization_seed: null
-  embedding_initialization: normal
-  embedding_initialization_std: 0.02
-  share_inverse_embedding: true
-  share_inverse_head: true
-  use_direction_embedding: false
-  generation_noise_std: 0.0
-  observation_noise_std: 0.0
   use_chunk_loss: true
   use_discrete_loss: true
   use_memory_loss: true
-  memory_scale_mode: fixed
-  memory_scale_granularity: global
   rho: 31.622777
-  memory_min_scale: 1e-4
-  memory_max_scale: 1e4
   stop_gradient_memory_target: true
   stop_gradient_memory_observation: false
   memory_observation_gradient_scale: 1.0
   use_terminal_loss: true
-  terminal_scale_mode: fixed
-  terminal_scale_granularity: global
   tau: 11.925695
-  terminal_min_scale: 1e-4
-  terminal_max_scale: 1e4
   learnable_terminal_target: true
-  use_terminal_chunk: false
-  use_terminal_chunk_loss: false
 
 task:
   _name_: aux_lm

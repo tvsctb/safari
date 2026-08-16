@@ -23,15 +23,7 @@ class RMTLossAnalysisTest(unittest.TestCase):
             chunk_size=2,
             num_memory_tokens=2,
             dropout=0.0,
-            share_inverse=False,
-            share_inverse_embedding=True,
-            share_inverse_head=True,
-            share_inverse_position_embedding=False,
-            inverse_position_initialization="copy",
-            use_direction_embedding=False,
             learnable_terminal_target=True,
-            use_terminal_chunk=False,
-            use_terminal_chunk_loss=False,
         ).eval()
 
     def test_forward_parameters_exclude_inverse_only_parameters(self):
