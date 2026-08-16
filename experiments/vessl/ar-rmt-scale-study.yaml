@@ -2,7 +2,7 @@ name: ar-rmt-noaux-targetsg-scale-20260817-v1
 description: Single-run automated no-AUX and target-SG RMT scale study
 resources:
   cluster: yonsei-ai-gpu
-  preset: gpu-4
+  preset: gpu-2
 image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
 env:
   WANDB_API_KEY:
@@ -14,12 +14,12 @@ run:
       cd /workspace/safari
       git checkout --detach 99423b478569d8716bafc0cec7a504011f3707bb
       test "$(git rev-parse HEAD)" = "99423b478569d8716bafc0cec7a504011f3707bb"
-      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "4"
-      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "4"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
       python -m unittest tests.test_aux_models tests.test_rmt_loss_analysis tests.test_ar_rmt_scale_study
       python scripts/run_ar_rmt_scale_study.py \
         --output-root /output/ar-rmt-noaux-targetsg-scale-20260817-v1 \
-        --gpu-ids 0,1,2,3 \
+        --gpu-ids 0,1 \
         --workers-per-gpu auto \
         --wandb-project aux-assc-recall \
         --wandb-entity bjjin07-x \
