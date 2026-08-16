@@ -15,7 +15,6 @@ from src.models.sequence.auxiliary import (
     initialize_scale,
     memory_reconstruction_diagnostics,
     mean_batch_variance,
-    mean_reconstruction_mse,
     memory_observation,
     memory_reconstruction_target,
     noisy_generation,
@@ -48,13 +47,14 @@ class CausalTransformerBlock(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, attention_mask):
+    def forward(self, x, attention_mask, key_padding_mask=None):
         normalized = self.norm1(x)
         attended, _ = self.attention(
             normalized,
             normalized,
             normalized,
             attn_mask=attention_mask,
+            key_padding_mask=key_padding_mask,
             need_weights=False,
         )
         x = x + self.dropout(attended)
@@ -433,12 +433,12 @@ class RMTAuxLM(nn.Module):
             self.embedding_initialization_std,
         )
         nn.init.normal_(self.initial_memory, std=0.02)
-        if self.write_input_mode == "memory_plus_query":
-            nn.init.zeros_(self.forward_queries)
-            nn.init.zeros_(self.inverse_queries)
-        else:
-            nn.init.normal_(self.forward_queries, std=0.02)
-            nn.init.normal_(self.inverse_queries, std=0.02)
+        # Keep the learned write-slot/role embeddings identical across write
+        # modes.  In memory_plus_query mode the only architectural change is
+        # adding the incoming memory to these queries; consuming the same RNG
+        # here also preserves every downstream initialization for paired runs.
+        nn.init.normal_(self.forward_queries, std=0.02)
+        nn.init.normal_(self.inverse_queries, std=0.02)
         initialize_position_embedding(
             self.position_embedding, self.position_initialization
         )
@@ -503,6 +503,7 @@ class RMTAuxLM(nn.Module):
         blocks,
         final_norm,
         position_embedding=None,
+        token_padding_mask=None,
     ):
         batch_size = memory.size(0)
         token_length = token_embeddings.size(1)
@@ -521,10 +522,30 @@ class RMTAuxLM(nn.Module):
             if self.write_input_mode == "memory_plus_query":
                 query_batch = memory + query_batch
             x = torch.cat((x, query_batch), dim=1)
+        key_padding_mask = None
+        if token_padding_mask is not None:
+            if token_padding_mask.shape != (batch_size, token_length):
+                raise ValueError(
+                    "token_padding_mask must match the token embedding batch and length"
+                )
+            memory_padding = torch.zeros(
+                batch_size,
+                self.num_memory_tokens,
+                dtype=torch.bool,
+                device=x.device,
+            )
+            key_padding_mask = torch.cat(
+                (
+                    memory_padding,
+                    token_padding_mask,
+                    memory_padding if queries is not None else memory_padding[:, :0],
+                ),
+                dim=1,
+            )
         sequence_length = x.size(1)
         mask = self.causal_mask[:sequence_length, :sequence_length]
         for block in blocks:
-            x = block(x, mask)
+            x = block(x, mask, key_padding_mask)
         x = final_norm(x)
         token_start = self.num_memory_tokens
         token_end = token_start + token_length
@@ -594,8 +615,107 @@ class RMTAuxLM(nn.Module):
             inverse_hidden = inverse_hidden[:, :-1]
         return self._inverse_logits(inverse_hidden), inverse_targets, reconstructed_memories
 
+    def _padded_inverse_records(self, records):
+        """Evaluate variable-length inverse records in one padded transformer call."""
+        max_length = max(record[0].size(1) for record in records)
+        input_groups = []
+        target_groups = []
+        padding_groups = []
+        has_padding = False
+        lengths = []
+        successor_memories = []
+        positions = torch.arange(max_length, device=records[0][0].device)
+        for chunks, boundaries, _, successor in records:
+            if self.token_scheme == "boundary_reverse":
+                data_ids, inverse_targets = boundary_inverse_targets(
+                    chunks, boundaries
+                )
+            else:
+                data_ids, inverse_targets = role_inverse_targets(
+                    chunks, self.token_scheme
+                )
+            padding = max_length - chunks.size(1)
+            if padding:
+                has_padding = True
+                data_ids = F.pad(data_ids, (0, padding), value=0)
+                inverse_targets = F.pad(
+                    inverse_targets, (0, padding), value=-100
+                )
+            padding_groups.append(
+                positions.unsqueeze(0).expand(chunks.size(0), -1)
+                >= chunks.size(1)
+            )
+            input_groups.append(data_ids)
+            target_groups.append(inverse_targets)
+            lengths.extend([chunks.size(1)] * chunks.size(0))
+            successor_memories.append(successor)
+
+        data_ids = torch.cat(input_groups, dim=0)
+        inverse_targets = torch.cat(target_groups, dim=0)
+        token_padding_mask = (
+            torch.cat(padding_groups, dim=0) if has_padding else None
+        )
+        observed_memories = noisy_observation(
+            memory_observation(
+                torch.cat(successor_memories, dim=0),
+                self.stop_gradient_memory_observation,
+                self.memory_observation_gradient_scale,
+            ),
+            self.observation_noise_std,
+            self.training,
+        )
+        inverse_embeddings = self.inverse_embedding(data_ids)
+        if (
+            self.token_scheme == "boundary_reverse"
+            and self.direction_embedding is not None
+        ):
+            inverse_embeddings = inverse_embeddings + self.direction_embedding
+        elif self.token_scheme != "boundary_reverse":
+            role_ids = torch.full(
+                (data_ids.size(0), 1),
+                self.inverse_token_id,
+                dtype=torch.long,
+                device=data_ids.device,
+            )
+            inverse_embeddings = torch.cat(
+                (self.inverse_embedding(role_ids), inverse_embeddings), dim=1
+            )
+            if token_padding_mask is not None:
+                token_padding_mask = torch.cat(
+                    (
+                        token_padding_mask.new_zeros(data_ids.size(0), 1),
+                        token_padding_mask,
+                    ),
+                    dim=1,
+                )
+        inverse_hidden, reconstructed_memories = self._transform(
+            observed_memories,
+            inverse_embeddings,
+            self.inverse_queries,
+            self.inverse_blocks,
+            self.inverse_final_norm,
+            self.inverse_position_embedding,
+            token_padding_mask,
+        )
+        if self.token_scheme != "boundary_reverse":
+            # The prepended role position predicts the first data token; the
+            # final data-token output has no target, matching _inverse_record.
+            inverse_hidden = inverse_hidden[:, :-1]
+        return (
+            self._inverse_logits(inverse_hidden),
+            inverse_targets,
+            reconstructed_memories,
+            torch.tensor(lengths, device=data_ids.device),
+        )
+
     def _forward_with_offset(
-        self, input_ids, targets, aux_tokens, state, compute_aux
+        self,
+        input_ids,
+        targets,
+        aux_tokens,
+        state,
+        compute_aux,
+        compute_diagnostics,
     ):
         batch_size, length = input_ids.shape
         if length == 0:
@@ -673,37 +793,37 @@ class RMTAuxLM(nn.Module):
         aux_loss = logits.new_zeros(())
 
         if compute_aux:
-            lengths = sorted({record[0].size(1) for record in inverse_records})
-            for inverse_length in lengths:
-                records = [
-                    record
-                    for record in inverse_records
-                    if record[0].size(1) == inverse_length
-                ]
-                chunks = torch.cat([record[0] for record in records], dim=0)
-                boundaries = None
+            if inverse_records:
+                (
+                    inverse_logits,
+                    inverse_targets,
+                    reconstructed_memories,
+                    lengths,
+                ) = self._padded_inverse_records(inverse_records)
+                positions = torch.arange(
+                    inverse_logits.size(1), device=inverse_logits.device
+                ).unsqueeze(0)
                 if self.token_scheme == "boundary_reverse":
-                    boundaries = torch.cat([record[1] for record in records], dim=0)
-                successor_memories = torch.cat(
-                    [record[3] for record in records], dim=0
-                )
-                inverse_logits, inverse_targets, reconstructed_memories = (
-                    self._inverse_record(chunks, boundaries, successor_memories)
-                )
-                if self.token_scheme == "boundary_reverse":
-                    if inverse_length > 1:
-                        chunk_logits.append(inverse_logits[:, :-1])
-                        chunk_targets.append(inverse_targets[:, :-1])
-                    discrete_logits.append(inverse_logits[:, -1:])
-                    discrete_targets.append(inverse_targets[:, -1:])
+                    chunk_mask = positions < (lengths - 1).unsqueeze(1)
+                    if chunk_mask.any():
+                        chunk_logits.append(inverse_logits[chunk_mask])
+                        chunk_targets.append(inverse_targets[chunk_mask])
+                    rows = torch.arange(lengths.numel(), device=lengths.device)
+                    discrete_logits.append(
+                        inverse_logits[rows, lengths - 1].unsqueeze(1)
+                    )
+                    discrete_targets.append(
+                        inverse_targets[rows, lengths - 1].unsqueeze(1)
+                    )
                 else:
-                    chunk_logits.append(inverse_logits)
-                    chunk_targets.append(inverse_targets)
+                    chunk_mask = positions < lengths.unsqueeze(1)
+                    chunk_logits.append(inverse_logits[chunk_mask])
+                    chunk_targets.append(inverse_targets[chunk_mask])
                 memory_targets.extend([
                     memory_reconstruction_target(
                         record[2], self.stop_gradient_memory_target
                     )
-                    for record in records
+                    for record in inverse_records
                 ])
                 memory_estimates.extend(
                     reconstructed_memories.split(batch_size, dim=0)
@@ -764,11 +884,8 @@ class RMTAuxLM(nn.Module):
                 "terminal_chunk": loss_terminal_chunk,
                 "total": aux_loss,
             }
-            memory_diagnostics = memory_reconstruction_diagnostics(
-                memory_targets, memory_estimates, logits
-            )
             initial_aux_diagnostics = {}
-            if self._initial_aux_diagnostics_pending:
+            if compute_diagnostics and self._initial_aux_diagnostics_pending:
                 for name, records in (
                     ("chunk", chunk_logits),
                     ("discrete", discrete_logits),
@@ -818,32 +935,43 @@ class RMTAuxLM(nn.Module):
                 "aux/discrete_ce": loss_discrete.detach(),
                 "aux/memory_nll": loss_memory.detach(),
                 "aux/terminal_nll": loss_terminal.detach(),
-                "aux/memory_reconstruction_mse": mean_reconstruction_mse(
-                    memory_targets, memory_estimates, logits
-                ),
-                **{
-                    f"aux/memory_{name}": value
-                    for name, value in memory_diagnostics.items()
-                },
-                "aux/terminal_reconstruction_mse": terminal_reconstruction_mse(
-                    terminal_memory, self.terminal_target
-                ),
                 "aux/terminal_chunk": loss_terminal_chunk.detach(),
                 "aux/total": aux_loss.detach(),
                 "aux/rho_mean": rho.detach().mean(),
                 "aux/tau_mean": tau.detach().mean(),
-                "aux/memory_batch_variance": (
-                    mean_batch_variance(
-                        [record[3] for record in inverse_records], batch_axis=0
-                    )
-                    if inverse_records
-                    else logits.detach().new_zeros(())
-                ),
-                "aux/terminal_batch_variance": mean_batch_variance(
-                    [terminal_memory], batch_axis=0
-                ),
                 **initial_aux_diagnostics,
             }
+            if compute_diagnostics:
+                memory_diagnostics = memory_reconstruction_diagnostics(
+                    memory_targets, memory_estimates, logits
+                )
+                self.metrics.update(
+                    {
+                        "aux/memory_reconstruction_mse": memory_diagnostics[
+                            "residual_mse"
+                        ],
+                        **{
+                            f"aux/memory_{name}": value
+                            for name, value in memory_diagnostics.items()
+                        },
+                        "aux/terminal_reconstruction_mse": (
+                            terminal_reconstruction_mse(
+                                terminal_memory, self.terminal_target
+                            )
+                        ),
+                        "aux/memory_batch_variance": (
+                            mean_batch_variance(
+                                [record[3] for record in inverse_records],
+                                batch_axis=0,
+                            )
+                            if inverse_records
+                            else logits.detach().new_zeros(())
+                        ),
+                        "aux/terminal_batch_variance": mean_batch_variance(
+                            [terminal_memory], batch_axis=0
+                        ),
+                    }
+                )
             if rho.numel() == 1:
                 self.metrics["aux/rho"] = rho.detach().reshape(())
             if tau.numel() == 1:
@@ -852,10 +980,11 @@ class RMTAuxLM(nn.Module):
                 self.metrics[f"aux/rho/{index}"] = value
             for index, value in enumerate(tau.detach().reshape(-1)):
                 self.metrics[f"aux/tau/{index}"] = value
-            for index, record in enumerate(inverse_records):
-                self.metrics[f"aux/memory_batch_variance/{index}"] = (
-                    mean_batch_variance([record[3]], batch_axis=0)
-                )
+            if compute_diagnostics:
+                for index, record in enumerate(inverse_records):
+                    self.metrics[f"aux/memory_batch_variance/{index}"] = (
+                        mean_batch_variance([record[3]], batch_axis=0)
+                    )
         else:
             self.metrics = {}
             self.loss_components = {}
@@ -869,6 +998,7 @@ class RMTAuxLM(nn.Module):
         aux_tokens=None,
         state=None,
         compute_aux=True,
+        compute_diagnostics=True,
         **kwargs,
     ):
         return self._forward_with_offset(
@@ -877,4 +1007,5 @@ class RMTAuxLM(nn.Module):
             aux_tokens,
             state,
             compute_aux,
+            compute_diagnostics,
         )

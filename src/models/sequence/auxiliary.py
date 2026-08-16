@@ -177,14 +177,20 @@ def gaussian_nll_sum(
     """Sum Gaussian coordinates and chunks, then average the minibatch."""
     if not targets:
         return reference.new_zeros(())
-    losses = []
-    for target, estimate in zip(targets, estimates):
-        state_scale = _broadcast_state_scale(scale, target, scale_axis)
-        losses.append(
-            ((target - estimate).float().pow(2) / (2.0 * state_scale.pow(2)))
-            + torch.log(state_scale)
-        )
-    return torch.stack([loss.sum() for loss in losses]).sum() / batch_size
+    if len(targets) != len(estimates):
+        raise ValueError("targets and estimates must have the same length")
+    target_values = torch.stack(tuple(targets))
+    estimate_values = torch.stack(tuple(estimates))
+    original_axis = scale_axis % target_values[0].ndim
+    state_scale = _broadcast_state_scale(
+        scale, target_values, original_axis + 1
+    )
+    losses = (
+        (target_values - estimate_values).float().square()
+        / (2.0 * state_scale.square())
+        + torch.log(state_scale)
+    )
+    return losses.sum() / batch_size
 
 
 def memory_reconstruction_target(value, stop_gradient=False):
@@ -215,11 +221,9 @@ def mean_batch_variance(values, batch_axis):
     """Average coordinate-wise population variance across the minibatch."""
     if not values:
         raise ValueError("values must contain at least one state tensor")
-    variances = [
-        value.detach().float().var(dim=batch_axis, correction=0).mean()
-        for value in values
-    ]
-    return torch.stack(variances).mean()
+    stacked = torch.stack(tuple(values)).detach().float()
+    original_axis = batch_axis % values[0].ndim
+    return stacked.var(dim=original_axis + 1, correction=0).mean()
 
 
 def mean_reconstruction_mse(targets, estimates, reference):
@@ -228,10 +232,9 @@ def mean_reconstruction_mse(targets, estimates, reference):
         return reference.new_zeros(())
     if len(targets) != len(estimates):
         raise ValueError("targets and estimates must have the same length")
-    return torch.stack([
-        (target.detach().float() - estimate.detach().float()).pow(2).mean()
-        for target, estimate in zip(targets, estimates)
-    ]).mean()
+    target_values = torch.stack(tuple(targets)).detach().float()
+    estimate_values = torch.stack(tuple(estimates)).detach().float()
+    return (target_values - estimate_values).square().mean()
 
 
 def memory_reconstruction_diagnostics(targets, estimates, reference):
@@ -258,25 +261,18 @@ def memory_reconstruction_diagnostics(targets, estimates, reference):
     if len(targets) != len(estimates):
         raise ValueError("targets and estimates must have the same length")
 
-    target_values = [value.detach().float() for value in targets]
-    estimate_values = [value.detach().float() for value in estimates]
-    target_second_moment = torch.stack(
-        [value.square().mean() for value in target_values]
-    ).mean()
-    estimate_second_moment = torch.stack(
-        [value.square().mean() for value in estimate_values]
-    ).mean()
-    residual_mse = torch.stack([
-        (target - estimate).square().mean()
-        for target, estimate in zip(target_values, estimate_values)
-    ]).mean()
-    target_batch_variance = mean_batch_variance(target_values, batch_axis=0)
-    estimate_batch_variance = mean_batch_variance(estimate_values, batch_axis=0)
+    target_values = torch.stack(tuple(targets)).detach().float()
+    estimate_values = torch.stack(tuple(estimates)).detach().float()
+    target_second_moment = target_values.square().mean()
+    estimate_second_moment = estimate_values.square().mean()
+    residual_mse = (target_values - estimate_values).square().mean()
+    target_batch_variance = target_values.var(dim=1, correction=0).mean()
+    estimate_batch_variance = estimate_values.var(dim=1, correction=0).mean()
     epsilon = torch.finfo(target_second_moment.dtype).eps
     relative_mse = residual_mse / target_second_moment.clamp_min(epsilon)
 
-    flat_target = torch.cat([value.reshape(-1) for value in target_values])
-    flat_estimate = torch.cat([value.reshape(-1) for value in estimate_values])
+    flat_target = target_values.reshape(-1)
+    flat_estimate = estimate_values.reshape(-1)
     cosine_denominator = flat_target.norm() * flat_estimate.norm()
     target_estimate_cosine = torch.where(
         cosine_denominator > 0,

@@ -756,15 +756,27 @@ class AuxModelTest(unittest.TestCase):
         )
         for model in models:
             with self.subTest(model=type(model).__name__):
+                method_name = (
+                    "_padded_inverse_records"
+                    if isinstance(model, RMTAuxLM)
+                    else "_inverse_record"
+                )
                 with mock.patch.object(
-                    model, "_inverse_record", wraps=model._inverse_record
+                    model, method_name, wraps=getattr(model, method_name)
                 ) as inverse_record:
                     output, terminal_state = model(
                         self.inputs, targets=self.targets, compute_aux=True
                     )
-                transition_count = sum(
-                    call.args[0].size(0) for call in inverse_record.call_args_list
-                ) // self.inputs.size(0)
+                if isinstance(model, RMTAuxLM):
+                    transition_count = sum(
+                        len(call.args[0])
+                        for call in inverse_record.call_args_list
+                    )
+                else:
+                    transition_count = sum(
+                        call.args[0].size(0)
+                        for call in inverse_record.call_args_list
+                    ) // self.inputs.size(0)
                 self.assertEqual(transition_count, 3)
                 self.assertEqual(model.metrics["aux/terminal_chunk"].item(), 0.0)
                 self.assertEqual(output.logits.shape, (2, 10, 20))
@@ -855,8 +867,20 @@ class AuxModelTest(unittest.TestCase):
             model.inverse_queries.untyped_storage().data_ptr(),
         )
 
-    def test_rmt_memory_plus_query_write_offsets_start_at_zero(self):
-        model = RMTAuxLM(
+    def test_rmt_memory_plus_query_preserves_query_mode_initialization(self):
+        torch.manual_seed(23)
+        query_model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            chunk_size=4,
+            num_memory_tokens=2,
+            write_input_mode="query",
+        )
+        torch.manual_seed(23)
+        memory_model = RMTAuxLM(
             d_model=8,
             n_layer=1,
             d_inner=16,
@@ -866,12 +890,10 @@ class AuxModelTest(unittest.TestCase):
             num_memory_tokens=2,
             write_input_mode="memory_plus_query",
         )
-        torch.testing.assert_close(
-            model.forward_queries, torch.zeros_like(model.forward_queries)
-        )
-        torch.testing.assert_close(
-            model.inverse_queries, torch.zeros_like(model.inverse_queries)
-        )
+        for name, value in query_model.state_dict().items():
+            self.assertTrue(torch.equal(value, memory_model.state_dict()[name]), name)
+        self.assertGreater(torch.count_nonzero(memory_model.forward_queries), 0)
+        self.assertGreater(torch.count_nonzero(memory_model.inverse_queries), 0)
 
     def test_rmt_memory_plus_query_copies_memory_into_both_write_paths(self):
         model = RMTAuxLM(
@@ -923,6 +945,64 @@ class AuxModelTest(unittest.TestCase):
                 captured[0][:, -2:],
                 memory + queries.unsqueeze(0),
             )
+
+    def test_rmt_padded_inverse_matches_length_grouped_evaluation(self):
+        for token_scheme in ("boundary_reverse", "role_reverse", "role_forward"):
+            torch.manual_seed(29)
+            model = RMTAuxLM(
+                d_model=8,
+                n_layer=1,
+                d_inner=16,
+                n_heads=2,
+                vocab_size=20,
+                chunk_size=4,
+                num_memory_tokens=2,
+                token_scheme=token_scheme,
+                share_inverse=False,
+                dropout=0.0,
+            ).eval()
+            records = []
+            for length in (4, 1):
+                chunks = torch.randint(0, 20, (2, length))
+                boundaries = (
+                    torch.randint(0, 20, (2,))
+                    if token_scheme == "boundary_reverse"
+                    else None
+                )
+                records.append(
+                    (
+                        chunks,
+                        boundaries,
+                        torch.randn(2, 2, 8),
+                        torch.randn(2, 2, 8),
+                    )
+                )
+            padded_logits, padded_targets, padded_memory, lengths = (
+                model._padded_inverse_records(records)
+            )
+            offset = 0
+            for record in records:
+                grouped_logits, grouped_targets, grouped_memory = (
+                    model._inverse_record(record[0], record[1], record[3])
+                )
+                count, length = record[0].shape
+                with self.subTest(token_scheme=token_scheme, length=length):
+                    torch.testing.assert_close(
+                        padded_logits[offset : offset + count, :length],
+                        grouped_logits,
+                    )
+                    torch.testing.assert_close(
+                        padded_targets[offset : offset + count, :length],
+                        grouped_targets,
+                    )
+                    torch.testing.assert_close(
+                        padded_memory[offset : offset + count], grouped_memory
+                    )
+                    torch.testing.assert_close(
+                        lengths[offset : offset + count],
+                        torch.full_like(lengths[offset : offset + count], length),
+                    )
+                offset += count
 
     def test_rmt_default_write_mode_matches_explicit_legacy_mode(self):
         torch.manual_seed(17)
@@ -1792,13 +1872,26 @@ class AuxModelTest(unittest.TestCase):
         ]
         for model in models:
             captured = []
-            original = model._inverse_record
+            if isinstance(model, RMTAuxLM):
+                original = model._padded_inverse_records
 
-            def capture(chunks, *args):
-                captured.append(chunks.detach().clone())
-                return original(chunks, *args)
+                def capture(records):
+                    captured.append(
+                        torch.cat([record[0] for record in records], dim=0)
+                        .detach()
+                        .clone()
+                    )
+                    return original(records)
 
-            model._inverse_record = capture
+                model._padded_inverse_records = capture
+            else:
+                original = model._inverse_record
+
+                def capture(chunks, *args):
+                    captured.append(chunks.detach().clone())
+                    return original(chunks, *args)
+
+                model._inverse_record = capture
             with self.subTest(model=type(model).__name__):
                 model(
                     self.inputs,
@@ -1870,6 +1963,32 @@ class AuxModelTest(unittest.TestCase):
         self.assertIn("diagnostic/initial_successor_memory_norm", model.metrics)
         model(self.inputs, targets=self.targets, compute_aux=True)
         self.assertNotIn("diagnostic/initial_chunk_logits_entropy", model.metrics)
+
+    def test_rmt_can_sample_detached_diagnostics_without_changing_losses(self):
+        model = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            num_memory_tokens=2,
+        )
+        output, _ = model(
+            self.inputs,
+            targets=self.targets,
+            compute_aux=True,
+            compute_diagnostics=False,
+        )
+        self.assertTrue(torch.isfinite(output.aux_loss))
+        self.assertIn("aux/memory_nll", model.metrics)
+        self.assertNotIn("aux/memory_relative_mse", model.metrics)
+        model(
+            self.inputs,
+            targets=self.targets,
+            compute_aux=True,
+            compute_diagnostics=True,
+        )
+        self.assertIn("aux/memory_relative_mse", model.metrics)
 
     def test_gru_role_state_boundaries_match_aux_chunks(self):
         model = GRUAuxLM(

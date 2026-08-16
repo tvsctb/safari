@@ -642,7 +642,17 @@ class SequenceLightningModule(pl.LightningModule):
         all_params = list(self.parameters())
         params = [p for p in all_params if not hasattr(p, "_optim")]
 
-        optimizer = utils.instantiate(registry.optimizer, self.hparams.optimizer, params)
+        optimizer_kwargs = {}
+        if self.hparams.train.get("fused_adamw", False):
+            if self.hparams.optimizer._name_ != "adamw":
+                raise ValueError("train.fused_adamw requires optimizer=adamw")
+            optimizer_kwargs["fused"] = True
+        optimizer = utils.instantiate(
+            registry.optimizer,
+            self.hparams.optimizer,
+            params,
+            **optimizer_kwargs,
+        )
 
         del self.hparams.optimizer._name_
 

@@ -29,7 +29,8 @@ model:
   embedding_initialization: normal
   embedding_initialization_std: 0.02
   # query: learned write slots (legacy); memory_plus_query: copy the incoming
-  # memory into write slots and add a learned, zero-initialized slot offset.
+  # memory into write slots and add the same normally initialized learned
+  # slot/role embedding used by query mode.
   write_input_mode: query
   share_inverse_embedding: true
   share_inverse_head: true
@@ -88,6 +89,9 @@ task:
   aux_gradient_norm_interval: 0
   # Optional exact optimizer-batch indices for sparse gradient diagnostics.
   aux_gradient_norm_steps: []
+  # Detached reconstruction diagnostics can be sampled without changing loss.
+  # Keep 1 for legacy behavior; larger intervals reduce tiny-kernel/logging cost.
+  aux_diagnostic_interval: 1
   # compact removes fixed/zero/redundant W&B series without changing the loss.
   aux_metric_profile: full
   torchmetrics: ['perplexity']

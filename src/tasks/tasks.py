@@ -210,117 +210,131 @@ def auxiliary_gradient_norm_metrics(
             allow_unused=True,
         )
 
-    def norm(values, mask=None):
-        squares = [
-            value.detach().float().pow(2).sum()
+    zero = lm_loss.detach().new_zeros(())
+
+    def gradient_squares(values):
+        return tuple(
+            None if value is None else value.detach().float().square().sum()
+            for value in values
+        )
+
+    def gradient_dots(left, right):
+        return tuple(
+            None
+            if left_value is None or right_value is None
+            else left_value.detach().float().mul(right_value.detach().float()).sum()
+            for left_value, right_value in zip(left, right)
+        )
+
+    def aggregate(values, mask=None):
+        selected = [
+            value
             for index, value in enumerate(values)
             if value is not None and (mask is None or mask[index])
         ]
-        if not squares:
-            return lm_loss.detach().new_zeros(())
-        return torch.stack(squares).sum().sqrt()
+        return torch.stack(selected).sum() if selected else zero
 
-    def cosine(left, right, mask=None):
-        indices = [
-            index
-            for index in range(len(left))
-            if mask is None or mask[index]
-        ]
-        left_values = [left[index] for index in indices if left[index] is not None]
-        right_values = [right[index] for index in indices if right[index] is not None]
-        pairs = [
-            (left[index], right[index])
-            for index in indices
-            if left[index] is not None and right[index] is not None
-        ]
-        if not left_values or not right_values:
-            return lm_loss.detach().new_zeros(())
-        dot = (
-            torch.stack([
-            left_value.detach().float().mul(right_value.detach().float()).sum()
-            for left_value, right_value in pairs
-            ]).sum()
-            if pairs
-            else lm_loss.detach().new_zeros(())
+    def norm(squares, mask=None):
+        return aggregate(squares, mask).sqrt()
+
+    def cosine(dots, left_squares, right_squares, mask=None):
+        dot = aggregate(dots, mask)
+        denominator = (
+            aggregate(left_squares, mask).sqrt()
+            * aggregate(right_squares, mask).sqrt()
         )
-        left_norm = torch.stack([
-            left_value.detach().float().pow(2).sum()
-            for left_value in left_values
-        ]).sum().sqrt()
-        right_norm = torch.stack([
-            right_value.detach().float().pow(2).sum()
-            for right_value in right_values
-        ]).sum().sqrt()
-        denominator = left_norm * right_norm
-        if denominator.item() == 0.0:
-            return dot.new_zeros(())
-        return dot / denominator
+        return torch.where(
+            denominator > 0,
+            dot / denominator.clamp_min(torch.finfo(dot.dtype).eps),
+            zero,
+        )
 
     lm_gradients = gradients(lm_loss)
+    lm_squares = gradient_squares(lm_gradients)
     forward_mask = tuple(value is not None for value in lm_gradients)
-    block_masks = {}
-    for index, name in enumerate(parameter_names):
-        leaf_name = name.rsplit(".", 1)[-1]
-        if leaf_name in {"rho", "tau", "raw_rho", "raw_tau"}:
-            block = "scale"
-        elif "terminal_target" in name:
-            block = "terminal_target"
-        elif any(
-            token in name
-            for token in ("initial_memory", "forward_queries", "inverse_queries")
-        ):
-            block = "memory_state"
-        elif any(
-            token in name
-            for token in ("embedding", "position_embedding", "direction_embedding")
-        ):
-            block = "embedding"
-        elif any(token in name for token in ("blocks", "final_norm", "gru")):
-            block = "backbone"
-        elif "head" in name:
-            block = "head"
-        else:
-            block = "other"
-        block_masks.setdefault(block, [False] * len(parameters))[index] = True
-    block_masks = {
-        name: tuple(mask)
-        for name, mask in block_masks.items()
-    }
+    layout = getattr(model, "_aux_gradient_metric_layout", None)
+    if layout is None or layout[0] != parameter_names:
+        block_masks = {}
+        for index, name in enumerate(parameter_names):
+            leaf_name = name.rsplit(".", 1)[-1]
+            if leaf_name in {"rho", "tau", "raw_rho", "raw_tau"}:
+                block = "scale"
+            elif "terminal_target" in name:
+                block = "terminal_target"
+            elif any(
+                token in name
+                for token in ("initial_memory", "forward_queries", "inverse_queries")
+            ):
+                block = "memory_state"
+            elif any(
+                token in name
+                for token in (
+                    "embedding",
+                    "position_embedding",
+                    "direction_embedding",
+                )
+            ):
+                block = "embedding"
+            elif any(token in name for token in ("blocks", "final_norm", "gru")):
+                block = "backbone"
+            elif "head" in name:
+                block = "head"
+            else:
+                block = "other"
+            block_masks.setdefault(block, [False] * len(parameters))[index] = True
+        block_masks = {
+            name: tuple(mask) for name, mask in block_masks.items()
+        }
+        layout = (parameter_names, block_masks)
+        model._aux_gradient_metric_layout = layout
+    else:
+        block_masks = layout[1]
     metrics = {
-        "grad_norm/all/lm": norm(lm_gradients),
-        "grad_norm/forward/lm": norm(lm_gradients, forward_mask),
+        "grad_norm/all/lm": norm(lm_squares),
+        "grad_norm/forward/lm": norm(lm_squares, forward_mask),
     }
     for block, mask in block_masks.items():
-        metrics[f"grad_norm/block/{block}/lm"] = norm(lm_gradients, mask)
+        metrics[f"grad_norm/block/{block}/lm"] = norm(lm_squares, mask)
     component_gradients = {}
+    component_squares = {}
     for name, component in loss_components.items():
         values = gradients(aux_weight * component)
         component_gradients[name] = values
-        metrics[f"grad_norm/all/aux/{name}"] = norm(values)
+        squares = gradient_squares(values)
+        component_squares[name] = squares
+        lm_dots = gradient_dots(lm_gradients, values)
+        metrics[f"grad_norm/all/aux/{name}"] = norm(squares)
         metrics[f"grad_norm/forward/aux/{name}"] = norm(
-            values, forward_mask
+            squares, forward_mask
         )
         metrics[f"grad_cosine/all/lm_aux/{name}"] = cosine(
-            lm_gradients, values
+            lm_dots, lm_squares, squares
         )
         metrics[f"grad_cosine/forward/lm_aux/{name}"] = cosine(
-            lm_gradients, values, forward_mask
+            lm_dots, lm_squares, squares, forward_mask
         )
         for block, mask in block_masks.items():
-            metrics[f"grad_norm/block/{block}/aux/{name}"] = norm(values, mask)
+            metrics[f"grad_norm/block/{block}/aux/{name}"] = norm(squares, mask)
             metrics[f"grad_cosine/block/{block}/lm_aux/{name}"] = cosine(
-                lm_gradients, values, mask
+                lm_dots, lm_squares, squares, mask
             )
     component_names = tuple(component_gradients)
     for left_index, left_name in enumerate(component_names):
         for right_name in component_names[left_index + 1:]:
             pair_name = f"{left_name}__{right_name}"
-            metrics[f"grad_cosine/all/aux_aux/{pair_name}"] = cosine(
-                component_gradients[left_name], component_gradients[right_name]
-            )
-            metrics[f"grad_cosine/forward/aux_aux/{pair_name}"] = cosine(
+            dots = gradient_dots(
                 component_gradients[left_name],
                 component_gradients[right_name],
+            )
+            metrics[f"grad_cosine/all/aux_aux/{pair_name}"] = cosine(
+                dots,
+                component_squares[left_name],
+                component_squares[right_name],
+            )
+            metrics[f"grad_cosine/forward/aux_aux/{pair_name}"] = cosine(
+                dots,
+                component_squares[left_name],
+                component_squares[right_name],
                 forward_mask,
             )
     return metrics
@@ -424,6 +438,7 @@ class AuxLMTask(LMTask):
         aux_weight=1.0,
         aux_gradient_norm_interval=0,
         aux_gradient_norm_steps=None,
+        aux_diagnostic_interval=1,
         aux_metric_profile="full",
         aux_weight_schedule="fixed",
         aux_weight_final=0.1,
@@ -456,6 +471,12 @@ class AuxLMTask(LMTask):
             raise ValueError(
                 "aux_gradient_norm_steps must contain non-negative integers"
             )
+        if (
+            isinstance(aux_diagnostic_interval, bool)
+            or not isinstance(aux_diagnostic_interval, int)
+            or aux_diagnostic_interval <= 0
+        ):
+            raise ValueError("aux_diagnostic_interval must be a positive integer")
         if aux_metric_profile not in {"full", "compact"}:
             raise ValueError("aux_metric_profile must be full or compact")
         scheduled_aux_weight(
@@ -563,8 +584,10 @@ class AuxLMTask(LMTask):
         self._aux_post_solve_step = 0
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
         self.aux_gradient_norm_steps = frozenset(aux_gradient_norm_steps)
+        self.aux_diagnostic_interval = aux_diagnostic_interval
         self.aux_metric_profile = aux_metric_profile
         self._aux_gradient_norm_step = 0
+        self._aux_diagnostic_step = 0
         super().__init__(**kwargs)
         self.lm_loss = self.loss
         self.loss = self._training_loss
@@ -666,6 +689,10 @@ class AuxLMTask(LMTask):
                 self.aux_weight_decay_end_step,
             )
         compute_aux = model.training and self._current_aux_weight != 0.0
+        compute_diagnostics = (
+            compute_aux
+            and self._aux_diagnostic_step % self.aux_diagnostic_interval == 0
+        )
         output, state = model(
             x,
             **w,
@@ -673,7 +700,10 @@ class AuxLMTask(LMTask):
             targets=y,
             aux_tokens=aux_tokens,
             compute_aux=compute_aux,
+            compute_diagnostics=compute_diagnostics,
         )
+        if compute_aux:
+            self._aux_diagnostic_step += 1
         output, w = decoder(output, state=state, **z)
         weighted_components, weighted_aux_loss = weighted_aux_components(
             getattr(model, "loss_components", {}),

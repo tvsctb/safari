@@ -35,6 +35,9 @@ train:
   test: False # Test after training
   debug: False # Special settings to make debugging more convenient
   ignore_warnings: False # Disable python warnings
+  # Use PyTorch's fused CUDA AdamW implementation without changing optimizer
+  # hyperparameters. Keep disabled for CPU runs and legacy reproducibility.
+  fused_adamw: false
 
   # These control state passing between batches
   state:
