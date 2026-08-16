@@ -12,15 +12,15 @@ run:
       set -euo pipefail
       git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
       cd /workspace/safari
-      git checkout --detach eee7329b077f7597041af92d6b94547e8012c474
-      test "$(git rev-parse HEAD)" = "eee7329b077f7597041af92d6b94547e8012c474"
+      git checkout --detach 99423b478569d8716bafc0cec7a504011f3707bb
+      test "$(git rev-parse HEAD)" = "99423b478569d8716bafc0cec7a504011f3707bb"
       test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "4"
       test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "4"
       python -m unittest tests.test_aux_models tests.test_rmt_loss_analysis tests.test_ar_rmt_scale_study
       python scripts/run_ar_rmt_scale_study.py \
         --output-root /output/ar-rmt-noaux-targetsg-scale-20260817-v1 \
         --gpu-ids 0,1,2,3 \
-        --workers-per-gpu 4 \
+        --workers-per-gpu auto \
         --wandb-project aux-assc-recall \
         --wandb-entity bjjin07-x \
         --wandb-group ar-rmt-noaux-targetsg-scale-20260817-v1
