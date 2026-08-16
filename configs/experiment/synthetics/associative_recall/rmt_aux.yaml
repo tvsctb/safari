@@ -28,10 +28,10 @@ model:
   block_initialization_seed: null
   embedding_initialization: normal
   embedding_initialization_std: 0.02
-  # query: learned write slots (legacy); memory_plus_query: copy the incoming
-  # memory into write slots and add the same normally initialized learned
-  # slot/role embedding used by query mode.
-  write_input_mode: query
+  # Default to the original-RMT-like write input: copy incoming memory into
+  # write slots and add a normally initialized learned slot/role embedding.
+  # Set query explicitly to recover the legacy learned-query-only path.
+  write_input_mode: memory_plus_query
   share_inverse_embedding: true
   share_inverse_head: true
   # Boundary-scheme switch; independent of parameter sharing.

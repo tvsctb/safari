@@ -1004,7 +1004,7 @@ class AuxModelTest(unittest.TestCase):
                     )
                 offset += count
 
-    def test_rmt_default_write_mode_matches_explicit_legacy_mode(self):
+    def test_rmt_default_write_mode_matches_explicit_memory_plus_query_mode(self):
         torch.manual_seed(17)
         default = RMTAuxLM(8, 1, 16, 2, 20, dropout=0.0)
         torch.manual_seed(17)
@@ -1015,7 +1015,7 @@ class AuxModelTest(unittest.TestCase):
             2,
             20,
             dropout=0.0,
-            write_input_mode="query",
+            write_input_mode="memory_plus_query",
         )
         default.eval()
         explicit.eval()

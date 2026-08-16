@@ -194,7 +194,7 @@ class RMTAuxLM(nn.Module):
         block_initialization_seed=None,
         embedding_initialization="normal",
         embedding_initialization_std=0.02,
-        write_input_mode="query",
+        write_input_mode="memory_plus_query",
         share_inverse_embedding=True,
         share_inverse_head=True,
         use_direction_embedding=False,
