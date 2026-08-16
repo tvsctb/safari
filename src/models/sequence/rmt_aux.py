@@ -186,7 +186,7 @@ class RMTAuxLM(nn.Module):
         num_memory_tokens=4,
         dropout=0.0,
         token_scheme="boundary_reverse",
-        share_inverse=True,
+        share_inverse=False,
         share_inverse_position_embedding=None,
         inverse_position_initialization="copy",
         position_initialization="normal",

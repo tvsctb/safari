@@ -1186,7 +1186,16 @@ class AuxModelTest(unittest.TestCase):
         self.assertEqual(rmt.terminal_scale_mode, "fixed")
         self.assertFalse(hasattr(rmt, "log_rho"))
         self.assertFalse(hasattr(rmt, "log_tau"))
-        self.assertIs(rmt.blocks, rmt.inverse_blocks)
+        self.assertEqual(rmt.write_input_mode, "memory_plus_query")
+        self.assertIsNot(rmt.blocks, rmt.inverse_blocks)
+        self.assertIsNot(rmt.final_norm, rmt.inverse_final_norm)
+        self.assertIsNotNone(rmt.inverse_position_embedding)
+        torch.testing.assert_close(
+            rmt.inverse_position_embedding, rmt.position_embedding
+        )
+        self.assertIs(rmt.inverse_embedding, rmt.embedding)
+        self.assertFalse(hasattr(rmt, "inverse_head"))
+        self.assertIsNone(rmt.direction_embedding)
 
     def test_untied_mode_shares_embedding_and_vocabulary_head(self):
         gru = GRUAuxLM(

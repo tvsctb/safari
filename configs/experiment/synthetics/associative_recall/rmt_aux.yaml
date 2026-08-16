@@ -20,8 +20,10 @@ model:
   chunk_size: 4
   num_memory_tokens: 4
   dropout: 0.0
-  share_inverse: true
-  share_inverse_position_embedding: true
+  # Keep the forward and inverse transition stacks/norms/PEs unshared while
+  # copying their initialization for paired structural comparisons.
+  share_inverse: false
+  share_inverse_position_embedding: false
   inverse_position_initialization: copy
   position_initialization: normal
   block_initialization: default
@@ -35,7 +37,7 @@ model:
   share_inverse_embedding: true
   share_inverse_head: true
   # Boundary-scheme switch; independent of parameter sharing.
-  use_direction_embedding: true
+  use_direction_embedding: false
   # Global transition perturbations. Generation noise propagates forward;
   # observation noise is visible only to the inverse path.
   generation_noise_std: 0.0
@@ -91,8 +93,26 @@ task:
   aux_gradient_norm_steps: []
   # Detached reconstruction diagnostics can be sampled without changing loss.
   # Keep 1 for legacy behavior; larger intervals reduce tiny-kernel/logging cost.
-  aux_diagnostic_interval: 1
+  aux_diagnostic_interval: 50
   # compact removes fixed/zero/redundant W&B series without changing the loss.
-  aux_metric_profile: full
+  aux_metric_profile: compact
   torchmetrics: ['perplexity']
   metrics: ['accuracy_ignore_index']
+
+train:
+  # The synthetic RMT fits without activation checkpointing. Fused AdamW is
+  # the language-experiment execution optimization that preserves the update.
+  global_batch_size: 32
+  fused_adamw: true
+  log_model_metrics_on_step: false
+
+optimizer:
+  lr: 1e-3
+  weight_decay: 0.1
+
+scheduler:
+  # 20% linear warmup for the default 400-epoch associative-recall recipe.
+  num_warmup_steps: ${eval:${div_up:${dataset.__train_len}, ${train.global_batch_size}} * ${div_up:${trainer.max_epochs}, 5}}
+
+wandb:
+  project: assoc-recall-rmt-write-memory
