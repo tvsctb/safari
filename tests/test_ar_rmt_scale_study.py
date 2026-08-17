@@ -42,6 +42,26 @@ class ArRMTScaleStudyTest(unittest.TestCase):
         self.assertNotIn("share_inverse", joined)
         self.assertNotIn("scale_mode", joined)
 
+    def test_terminal_off_target_sg_on_command(self):
+        trial = study.Trial(
+            trial_id="terminal-off-targetsg-on-rp025-s202",
+            seed=202,
+            max_epochs=study.FULL_EPOCHS,
+            aux_weight=0.1,
+            target_sg=True,
+            scale=study.Scale(0.25, 2.0),
+            phase="terminal_off_sgon",
+            use_terminal_loss=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            command = study.build_command(
+                trial, Path(directory), "project", "entity", "group"
+            )
+        self.assertIn("model.use_terminal_loss=false", command)
+        self.assertIn("model.learnable_terminal_target=false", command)
+        self.assertIn("model.stop_gradient_memory_target=true", command)
+        self.assertIn("model.rho=63.245554000", command)
+
     def test_ranking_uses_paired_seed_mean_then_loss(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

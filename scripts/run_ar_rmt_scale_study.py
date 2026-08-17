@@ -101,6 +101,7 @@ class Trial:
     target_sg: bool
     scale: Scale
     phase: str
+    use_terminal_loss: bool = True
 
 
 def initial_scales() -> Tuple[Scale, ...]:
@@ -288,8 +289,8 @@ def build_command(
         "model.use_chunk_loss=true",
         "model.use_discrete_loss=true",
         "model.use_memory_loss=true",
-        "model.use_terminal_loss=true",
-        "model.learnable_terminal_target=true",
+        f"model.use_terminal_loss={str(trial.use_terminal_loss).lower()}",
+        f"model.learnable_terminal_target={str(trial.use_terminal_loss).lower()}",
         f"model.stop_gradient_memory_target={str(trial.target_sg).lower()}",
         "model.stop_gradient_memory_observation=false",
         "model.memory_observation_gradient_scale=1.0",
