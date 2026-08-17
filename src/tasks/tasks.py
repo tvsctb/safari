@@ -194,7 +194,6 @@ def auxiliary_gradient_norm_metrics(
         for name, parameter in model.named_parameters()
         if parameter.requires_grad
     )
-    parameter_names = tuple(name for name, _ in named_parameters)
     parameters = tuple(parameter for _, parameter in named_parameters)
     if not parameters:
         return {}
@@ -265,52 +264,23 @@ def auxiliary_gradient_norm_metrics(
             zero,
         )
 
+    def ratio(numerator, denominator):
+        return torch.where(
+            denominator > 0,
+            numerator / denominator.clamp_min(torch.finfo(denominator.dtype).eps),
+            zero,
+        )
+
     lm_gradients = gradients(lm_loss)
     lm_squares = gradient_squares(lm_gradients)
     forward_mask = tuple(value is not None for value in lm_gradients)
-    layout = getattr(model, "_aux_gradient_metric_layout", None)
-    if layout is None or layout[0] != parameter_names:
-        block_masks = {}
-        for index, name in enumerate(parameter_names):
-            leaf_name = name.rsplit(".", 1)[-1]
-            if leaf_name in {"rho", "tau", "raw_rho", "raw_tau"}:
-                block = "scale"
-            elif "terminal_target" in name:
-                block = "terminal_target"
-            elif any(
-                token in name
-                for token in ("initial_memory", "forward_queries", "inverse_queries")
-            ):
-                block = "memory_state"
-            elif any(
-                token in name
-                for token in (
-                    "embedding",
-                    "position_embedding",
-                    "direction_embedding",
-                )
-            ):
-                block = "embedding"
-            elif any(token in name for token in ("blocks", "final_norm", "gru")):
-                block = "backbone"
-            elif "head" in name:
-                block = "head"
-            else:
-                block = "other"
-            block_masks.setdefault(block, [False] * len(parameters))[index] = True
-        block_masks = {
-            name: tuple(mask) for name, mask in block_masks.items()
-        }
-        layout = (parameter_names, block_masks)
-        model._aux_gradient_metric_layout = layout
-    else:
-        block_masks = layout[1]
+    inverse_mask = tuple(not value for value in forward_mask)
+    lm_all_norm = norm(lm_squares)
+    lm_forward_norm = norm(lm_squares, forward_mask)
     metrics = {
-        "grad_norm/all/lm": norm(lm_squares),
-        "grad_norm/forward/lm": norm(lm_squares, forward_mask),
+        "grad_norm/all/lm": lm_all_norm,
+        "grad_norm/forward/lm": lm_forward_norm,
     }
-    for block, mask in block_masks.items():
-        metrics[f"grad_norm/block/{block}/lm"] = norm(lm_squares, mask)
     component_gradients = {}
     component_squares = {}
     ordered_components = [
@@ -332,9 +302,15 @@ def auxiliary_gradient_norm_metrics(
         squares = gradient_squares(values)
         component_squares[name] = squares
         lm_dots = gradient_dots(lm_gradients, values)
-        metrics[f"grad_norm/all/aux/{name}"] = norm(squares)
-        metrics[f"grad_norm/forward/aux/{name}"] = norm(
-            squares, forward_mask
+        all_norm = norm(squares)
+        forward_norm = norm(squares, forward_mask)
+        inverse_norm = norm(squares, inverse_mask)
+        metrics[f"grad_norm/all/aux/{name}"] = all_norm
+        metrics[f"grad_norm/forward/aux/{name}"] = forward_norm
+        metrics[f"grad_norm/inverse/aux/{name}"] = inverse_norm
+        metrics[f"grad_ratio/all/aux_lm/{name}"] = ratio(all_norm, lm_all_norm)
+        metrics[f"grad_ratio/forward/aux_lm/{name}"] = ratio(
+            forward_norm, lm_forward_norm
         )
         metrics[f"grad_cosine/all/lm_aux/{name}"] = cosine(
             lm_dots, lm_squares, squares
@@ -342,11 +318,6 @@ def auxiliary_gradient_norm_metrics(
         metrics[f"grad_cosine/forward/lm_aux/{name}"] = cosine(
             lm_dots, lm_squares, squares, forward_mask
         )
-        for block, mask in block_masks.items():
-            metrics[f"grad_norm/block/{block}/aux/{name}"] = norm(squares, mask)
-            metrics[f"grad_cosine/block/{block}/lm_aux/{name}"] = cosine(
-                lm_dots, lm_squares, squares, mask
-            )
     component_names = tuple(
         name for name in component_gradients if name != "total"
     )
@@ -470,7 +441,6 @@ class AuxLMTask(LMTask):
         aux_gradient_norm_interval=0,
         aux_gradient_norm_steps=None,
         aux_diagnostic_interval=1,
-        aux_metric_profile="full",
         aux_weight_schedule="fixed",
         aux_weight_final=0.1,
         aux_weight_decay_start_step=0,
@@ -508,8 +478,6 @@ class AuxLMTask(LMTask):
             or aux_diagnostic_interval <= 0
         ):
             raise ValueError("aux_diagnostic_interval must be a positive integer")
-        if aux_metric_profile not in {"full", "compact"}:
-            raise ValueError("aux_metric_profile must be full or compact")
         scheduled_aux_weight(
             aux_weight,
             aux_weight_final,
@@ -616,7 +584,6 @@ class AuxLMTask(LMTask):
         self.aux_gradient_norm_interval = aux_gradient_norm_interval
         self.aux_gradient_norm_steps = frozenset(aux_gradient_norm_steps)
         self.aux_diagnostic_interval = aux_diagnostic_interval
-        self.aux_metric_profile = aux_metric_profile
         self._aux_gradient_norm_step = 0
         self._aux_diagnostic_step = 0
         super().__init__(**kwargs)
@@ -832,52 +799,8 @@ class AuxLMTask(LMTask):
         if aux_loss is not None:
             metrics["aux_loss"] = aux_loss.detach()
         if aux_metrics:
-            if getattr(self, "aux_metric_profile", "full") == "compact":
-                aux_metrics = {
-                    name: value
-                    for name, value in aux_metrics.items()
-                    if self._keep_compact_aux_metric(name)
-                }
             metrics.update(aux_metrics)
         return metrics
-
-    @staticmethod
-    def _keep_compact_aux_metric(name):
-        core = {
-            "aux/chunk_ce",
-            "aux/discrete_ce",
-            "aux/memory_nll",
-            "aux/terminal_nll",
-            "aux/total",
-            "aux/terminal_reconstruction_mse",
-            "aux/memory_target_second_moment",
-            "aux/memory_estimate_second_moment",
-            "aux/memory_residual_mse",
-            "aux/memory_relative_mse",
-            "aux/memory_relative_rmse",
-            "aux/memory_norm_ratio",
-            "aux/memory_target_estimate_cosine",
-            "aux/memory_target_batch_variance",
-            "aux/memory_estimate_batch_variance",
-            "aux/memory_batch_r2",
-        }
-        if name in core or name.startswith("diagnostic/"):
-            return True
-        if name in {
-            "grad_norm/all/lm",
-            "grad_norm/forward/lm",
-            "grad_norm/all/aux/memory_nll",
-            "grad_norm/forward/aux/memory_nll",
-            "grad_cosine/all/lm_aux/memory_nll",
-            "grad_cosine/forward/lm_aux/memory_nll",
-        }:
-            return True
-        return any(
-            name.startswith(f"{kind}/block/{block}/")
-            and name.endswith(("/lm", "/aux/memory_nll", "/lm_aux/memory_nll"))
-            for kind in ("grad_norm", "grad_cosine")
-            for block in ("backbone", "memory_state", "embedding")
-        )
 
 class ForecastingTask(BaseTask):
 

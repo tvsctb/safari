@@ -300,7 +300,6 @@ def build_command(
         "task.aux_weight_schedule=fixed",
         f"task.aux_gradient_norm_interval={1570 if trial.aux_weight else 0}",
         "task.aux_diagnostic_interval=157",
-        "task.aux_metric_profile=compact",
         "wandb.mode=online",
         f"wandb.project={project}",
         f"+wandb.entity={entity}",

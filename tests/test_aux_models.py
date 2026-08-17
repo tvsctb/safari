@@ -335,9 +335,8 @@ class AuxTaskMetricTest(unittest.TestCase):
         self.assertEqual(metrics["aux_loss"].item(), 2.0)
         self.assertEqual(metrics["lm_loss"].item(), 0.5)
 
-    def test_compact_aux_metrics_keep_memory_scale_diagnostics(self):
+    def test_aux_metrics_are_not_silently_filtered(self):
         task = object.__new__(AuxLMTask)
-        task.aux_metric_profile = "compact"
         task.lm_loss = lambda logits, targets: logits.sum() * 0.0
         logits = torch.zeros(2, 3)
         targets = torch.zeros(2, dtype=torch.long)
@@ -355,11 +354,9 @@ class AuxTaskMetricTest(unittest.TestCase):
             )
         self.assertIn("aux/memory_relative_mse", metrics)
         self.assertIn("grad_norm/forward/aux/memory_nll", metrics)
-        self.assertNotIn("aux/rho", metrics)
-        self.assertNotIn("aux/terminal_chunk", metrics)
-        self.assertNotIn(
-            "grad_cosine/all/aux_aux/chunk_ce__memory_nll", metrics
-        )
+        self.assertIn("aux/rho", metrics)
+        self.assertIn("aux/terminal_chunk", metrics)
+        self.assertIn("grad_cosine/all/aux_aux/chunk_ce__memory_nll", metrics)
 
     def test_memory_reconstruction_diagnostics_separate_size_and_variance(self):
         target = torch.tensor([[[1.0, 3.0]], [[3.0, 5.0]]])
@@ -427,7 +424,13 @@ class AuxTaskMetricTest(unittest.TestCase):
         self.assertEqual(metrics["grad_cosine/forward/lm_aux/shared"].item(), 1.0)
         self.assertEqual(metrics["grad_cosine/all/lm_aux/aux_only"].item(), 0.0)
         torch.testing.assert_close(
-            metrics["grad_norm/block/other/lm"], torch.tensor(2.0)
+            metrics["grad_norm/inverse/aux/shared"], torch.tensor(0.1)
+        )
+        torch.testing.assert_close(
+            metrics["grad_ratio/forward/aux_lm/shared"], torch.tensor(0.1)
+        )
+        torch.testing.assert_close(
+            metrics["grad_ratio/all/aux_lm/aux_only"], torch.tensor(0.2)
         )
         self.assertIn("grad_cosine/all/aux_aux/shared__aux_only", metrics)
 

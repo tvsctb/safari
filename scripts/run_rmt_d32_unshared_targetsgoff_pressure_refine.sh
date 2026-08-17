@@ -79,7 +79,6 @@ common=(
   task.aux_solved_ce_threshold=null
   task.aux_gradient_norm_interval=0
   task.aux_gradient_norm_steps="$gradient_steps"
-  task.aux_metric_profile=compact
   wandb.mode=online
   wandb.project=aux-assoc-recall
   wandb.group="$group"

@@ -88,7 +88,6 @@ common=(
   task.aux_activation_lm_loss_threshold=null
   task.aux_solved_ce_threshold=null
   task.aux_diagnostic_interval=50
-  task.aux_metric_profile=compact
   wandb.mode=online
   wandb.project="$project"
 )

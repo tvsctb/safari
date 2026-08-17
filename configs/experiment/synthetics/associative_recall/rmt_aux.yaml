@@ -62,8 +62,6 @@ task:
   # Detached reconstruction diagnostics can be sampled without changing loss.
   # Keep 1 for legacy behavior; larger intervals reduce tiny-kernel/logging cost.
   aux_diagnostic_interval: 50
-  # compact removes fixed/zero/redundant W&B series without changing the loss.
-  aux_metric_profile: compact
   torchmetrics: ['perplexity']
   metrics: ['accuracy_ignore_index']
 
