@@ -108,6 +108,7 @@ class RMTAuxLM(nn.Module):
         stop_gradient_memory_target=False,
         stop_gradient_memory_observation=False,
         memory_observation_gradient_scale=1.0,
+        reconstruct_initial_memory=True,
         learnable_terminal_target=True,
         use_chunk_loss=True,
         use_discrete_loss=True,
@@ -174,6 +175,7 @@ class RMTAuxLM(nn.Module):
         self.memory_observation_gradient_scale = validate_memory_observation_gradient_scale(
             memory_observation_gradient_scale
         )
+        self.reconstruct_initial_memory = bool(reconstruct_initial_memory)
         self.learnable_terminal_target = learnable_terminal_target
         self.use_chunk_loss = use_chunk_loss
         self.use_discrete_loss = use_discrete_loss
@@ -478,14 +480,24 @@ class RMTAuxLM(nn.Module):
                 discrete_targets.append(
                     inverse_targets[rows, lengths - 1].unsqueeze(1)
                 )
+                memory_records = (
+                    inverse_records
+                    if self.reconstruct_initial_memory
+                    else inverse_records[1:]
+                )
                 memory_targets.extend([
                     memory_reconstruction_target(
                         record[2], self.stop_gradient_memory_target
                     )
-                    for record in inverse_records
+                    for record in memory_records
                 ])
+                reconstructed_by_transition = reconstructed_memories.split(
+                    batch_size, dim=0
+                )
                 memory_estimates.extend(
-                    reconstructed_memories.split(batch_size, dim=0)
+                    reconstructed_by_transition
+                    if self.reconstruct_initial_memory
+                    else reconstructed_by_transition[1:]
                 )
 
             rho = self._scale("rho")
@@ -503,14 +515,17 @@ class RMTAuxLM(nn.Module):
                 ) / sequence_normalizer
             loss_memory = logits.new_zeros(())
             if self.use_memory_loss:
-                loss_memory = gaussian_nll_sum(
-                    memory_targets,
-                    memory_estimates,
-                    rho,
-                    logits,
-                    batch_size,
-                    scale_axis=1,
-                ) / sequence_normalizer
+                if memory_targets:
+                    loss_memory = gaussian_nll_sum(
+                        memory_targets,
+                        memory_estimates,
+                        rho,
+                        logits,
+                        batch_size,
+                        scale_axis=1,
+                    ) / sequence_normalizer
+                else:
+                    loss_memory = reconstructed_memories.sum() * 0.0
             loss_terminal = logits.new_zeros(())
             if self.use_terminal_loss:
                 loss_terminal = terminal_gaussian_nll(

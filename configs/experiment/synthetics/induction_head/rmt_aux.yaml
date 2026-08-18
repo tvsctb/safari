@@ -42,6 +42,7 @@ model:
   stop_gradient_memory_target: false
   stop_gradient_memory_observation: false
   memory_observation_gradient_scale: 1.0
+  reconstruct_initial_memory: true
   use_terminal_loss: true
   tau: 11.925695
   learnable_terminal_target: true

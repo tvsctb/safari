@@ -475,6 +475,54 @@ class AuxModelTest(unittest.TestCase):
         self.inputs = torch.randint(0, 20, (2, 10))
         self.targets = torch.randint(0, 20, (2, 10))
 
+    def test_rmt_initial_memory_reconstruction_exclusion_keeps_token_losses(self):
+        torch.manual_seed(83)
+        included = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            chunk_size=4,
+            num_memory_tokens=2,
+            dropout=0.0,
+            reconstruct_initial_memory=True,
+        ).eval()
+        excluded = RMTAuxLM(
+            d_model=8,
+            n_layer=1,
+            d_inner=16,
+            n_heads=2,
+            vocab_size=20,
+            chunk_size=4,
+            num_memory_tokens=2,
+            dropout=0.0,
+            reconstruct_initial_memory=False,
+        ).eval()
+        excluded.load_state_dict(included.state_dict())
+
+        included(self.inputs[:, :8], targets=self.targets[:, :8], compute_aux=True)
+        included_components = {
+            name: value.detach().clone()
+            for name, value in included.loss_components.items()
+        }
+        excluded(self.inputs[:, :8], targets=self.targets[:, :8], compute_aux=True)
+        torch.testing.assert_close(
+            excluded.loss_components["chunk_ce"], included_components["chunk_ce"]
+        )
+        torch.testing.assert_close(
+            excluded.loss_components["discrete_ce"],
+            included_components["discrete_ce"],
+        )
+        self.assertNotEqual(
+            excluded.loss_components["memory_nll"].item(),
+            included_components["memory_nll"].item(),
+        )
+
+        excluded(self.inputs[:, :4], targets=self.targets[:, :4], compute_aux=True)
+        self.assertEqual(excluded.loss_components["memory_nll"].item(), 0.0)
+        self.assertNotEqual(excluded.loss_components["discrete_ce"].item(), 0.0)
+
     def _models(self):
         return [
             GRUAuxLM(
