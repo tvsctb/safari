@@ -326,6 +326,7 @@ class StudyController:
         project: str,
         entity: str,
         group: str,
+        command_builder=build_command,
         dry_run: bool = False,
     ):
         self.output_root = output_root
@@ -333,6 +334,7 @@ class StudyController:
         self.project = project
         self.entity = entity
         self.group = group
+        self.command_builder = command_builder
         self.dry_run = dry_run
         self.manifest_path = output_root / "manifest.json"
         self.lock = threading.Lock()
@@ -414,7 +416,7 @@ class StudyController:
             while True:
                 total_attempts += 1
                 rung_attempts += 1
-                command = build_command(
+                command = self.command_builder(
                     trial, self.output_root, self.project, self.entity, self.group
                 )
                 self._update(
