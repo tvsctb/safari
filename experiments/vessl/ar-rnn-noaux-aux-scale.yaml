@@ -1,4 +1,4 @@
-name: ar-rnn-noaux-aux-scale-20260819-v1
+name: ar-rnn-noaux-aux-scale-20260819-v2
 description: Single-run parameter-matched vanilla-RNN no-AUX, AUX scale, and held-out study
 resources:
   cluster: yonsei-ai-gpu
@@ -12,16 +12,16 @@ run:
       set -euo pipefail
       git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
       cd /workspace/safari
-      git checkout --detach c8c0f25b23bcf9c8ba8ea1cb390793fb63e1eb85
-      test "$(git rev-parse HEAD)" = "c8c0f25b23bcf9c8ba8ea1cb390793fb63e1eb85"
+      git checkout --detach 701d72524c9776c874a60cbe0ae9bbd33b06b735
+      test "$(git rev-parse HEAD)" = "701d72524c9776c874a60cbe0ae9bbd33b06b735"
       test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
       test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
       python -m unittest tests.test_rnn_aux tests.test_ar_rmt_scale_study tests.test_ar_rnn_study
       python scripts/run_ar_rnn_study.py \
-        --output-root /output/ar-rnn-noaux-aux-scale-20260819-v1 \
+        --output-root /output/ar-rnn-noaux-aux-scale-20260819-v2 \
         --gpu-ids 0,1 \
         --workers-per-gpu 8 \
         --wandb-project aux-assc-recall \
         --wandb-entity bjjin07-x \
-        --wandb-group ar-rnn-noaux-aux-scale-20260819-v1
+        --wandb-group ar-rnn-noaux-aux-scale-20260819-v2
     workdir: /workspace
