@@ -1,0 +1,32 @@
+name: ar-rnn-tanh-irnn-auto5h-20260819-v2
+description: Safe-terminal tanh AUX refinement and independent iRNN study
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-2
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach 6d2e392d1b24911c05020baf41106c888c19b592
+      test "$(git rev-parse HEAD)" = "6d2e392d1b24911c05020baf41106c888c19b592"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_rnn_aux \
+        tests.test_ar_rmt_scale_study \
+        tests.test_ar_rnn_study \
+        tests.test_ar_rnn_two_track_study
+      PYTHONPATH=.:scripts python scripts/run_ar_rnn_two_track_study.py \
+        --output-root /output/ar-rnn-tanh-irnn-auto5h-20260819-v2 \
+        --gpu-ids 0,1 \
+        --workers-per-gpu 8 \
+        --wandb-project aux-assc-recall \
+        --wandb-entity bjjin07-x \
+        --wandb-group-prefix ar-rnn-tanh-irnn-auto5h-20260819-v2 \
+        --max-runtime-minutes 285
+    workdir: /workspace
