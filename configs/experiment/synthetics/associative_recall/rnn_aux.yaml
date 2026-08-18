@@ -9,7 +9,7 @@ dataset:
 model:
   _name_: rnn_aux_lm
   d_model: 64
-  n_layer: 1
+  n_layer: 3
   vocab_size: ${dataset.vocab_size}
   chunk_size: 4
   chunk_offset: random

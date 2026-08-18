@@ -1,4 +1,5 @@
 import copy
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,68 @@ from src.models.sequence.auxiliary import (
     memory_reconstruction_target,
     validate_memory_observation_gradient_scale,
 )
+
+
+class StackedTanhRNN(nn.Module):
+    """A stacked vanilla RNN that exposes every layer's state trajectory.
+
+    Each layer is evaluated over the complete sequence in one native RNN call.
+    This keeps the recurrent computation independent of auxiliary chunking while
+    avoiding a Python loop over tokens.
+    """
+
+    def __init__(self, d_model, n_layer, dropout=0.0):
+        super().__init__()
+        self.d_model = d_model
+        self.n_layer = n_layer
+        self.dropout = float(dropout)
+        self.layers = nn.ModuleList(
+            nn.RNN(
+                d_model,
+                d_model,
+                num_layers=1,
+                nonlinearity="tanh",
+                batch_first=True,
+            )
+            for _ in range(n_layer)
+        )
+
+    def reset_parameters(self):
+        for layer in self.layers:
+            nn.init.xavier_uniform_(layer.weight_ih_l0)
+            nn.init.orthogonal_(layer.weight_hh_l0)
+            nn.init.zeros_(layer.bias_ih_l0)
+            nn.init.zeros_(layer.bias_hh_l0)
+
+    def forward(self, inputs, state, return_trajectory=False):
+        if inputs.ndim != 3:
+            raise ValueError("RNN inputs must have shape (batch, length, d_model)")
+        expected_state = (self.n_layer, inputs.size(0), self.d_model)
+        if tuple(state.shape) != expected_state:
+            raise ValueError(f"RNN state must have shape {expected_state}")
+
+        layer_input = inputs
+        terminal_states = []
+        trajectories = [] if return_trajectory else None
+        for index, layer in enumerate(self.layers):
+            if index > 0 and self.dropout > 0.0:
+                layer_input = F.dropout(
+                    layer_input, p=self.dropout, training=self.training
+                )
+            layer_output, terminal_state = layer(
+                layer_input, state[index : index + 1]
+            )
+            terminal_states.append(terminal_state)
+            if return_trajectory:
+                trajectories.append(layer_output)
+            layer_input = layer_output
+
+        terminal_state = torch.cat(terminal_states, dim=0)
+        if not return_trajectory:
+            return layer_input, terminal_state, None
+        # Keep native layer outputs separate. AUX gathers only boundary states,
+        # avoiding an additional full (layers, batch, time, hidden) allocation.
+        return layer_input, terminal_state, tuple(trajectories)
 
 
 class RNNAuxLM(nn.Module):
@@ -77,14 +140,7 @@ class RNNAuxLM(nn.Module):
 
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.initial_state = nn.Parameter(torch.empty(n_layer, 1, d_model))
-        self.rnn = nn.RNN(
-            d_model,
-            d_model,
-            num_layers=n_layer,
-            nonlinearity="tanh",
-            dropout=dropout if n_layer > 1 else 0.0,
-            batch_first=True,
-        )
+        self.rnn = StackedTanhRNN(d_model, n_layer, dropout=dropout)
         self.inverse_rnn = copy.deepcopy(self.rnn)
         self.memory_predictor = nn.Sequential(
             nn.Linear(d_model, 2 * d_model),
@@ -99,11 +155,7 @@ class RNNAuxLM(nn.Module):
     def reset_parameters(self):
         nn.init.normal_(self.embedding.weight, std=0.02)
         nn.init.normal_(self.initial_state, std=0.02)
-        for layer in range(self.n_layer):
-            nn.init.xavier_uniform_(getattr(self.rnn, f"weight_ih_l{layer}"))
-            nn.init.orthogonal_(getattr(self.rnn, f"weight_hh_l{layer}"))
-            nn.init.zeros_(getattr(self.rnn, f"bias_ih_l{layer}"))
-            nn.init.zeros_(getattr(self.rnn, f"bias_hh_l{layer}"))
+        self.rnn.reset_parameters()
         self.inverse_rnn.load_state_dict(self.rnn.state_dict())
 
         first = self.memory_predictor[0]
@@ -137,109 +189,114 @@ class RNNAuxLM(nn.Module):
             (batch_size,), fixed, device=device, dtype=torch.long
         )
 
-    def _inverse_record(self, chunks, boundaries, successor_states):
+    def _inverse_batch(self, chunks, boundaries, successor_states):
         data_ids, inverse_targets = boundary_inverse_targets(chunks, boundaries)
         observed_states = memory_observation(
             successor_states,
             self.stop_gradient_memory_observation,
             self.memory_observation_gradient_scale,
         )
-        inverse_outputs, inverse_state = self.inverse_rnn(
+        inverse_outputs, inverse_state, _ = self.inverse_rnn(
             self.embedding(data_ids), observed_states
         )
         reconstructed_state = self._predict_memory(inverse_state)
         return self._lm_logits(inverse_outputs), inverse_targets, reconstructed_state
 
-    def _forward_with_offset(
-        self,
-        input_ids,
-        targets,
-        aux_tokens,
-        state,
-        compute_aux,
-        compute_diagnostics,
-        offset,
-    ):
-        batch_size, length = input_ids.shape
-        if length == 0:
-            raise ValueError("input sequence must be non-empty")
-        token_stream = aux_tokens
-        if token_stream is None and targets is not None and not torch.any(targets < 0):
-            token_stream = targets
-        if token_stream is not None and token_stream.shape != input_ids.shape:
-            raise ValueError("aux_tokens must have the same shape as input_ids")
-        if compute_aux and token_stream is None:
-            raise ValueError("unmasked aux_tokens are required when compute_aux=True")
-
-        hidden = (
-            self.default_state(batch_size, device=input_ids.device)
-            if state is None
-            else state
+    @staticmethod
+    def _state_at(initial_state, trajectory, position, indices):
+        if position == 0:
+            return initial_state.index_select(1, indices)
+        return torch.stack(
+            [
+                layer_states[:, position - 1].index_select(0, indices)
+                for layer_states in trajectory
+            ],
+            dim=0,
         )
-        ranges = chunk_ranges(length, self.chunk_size, offset)
-        forward_logits = []
-        inverse_records = []
-        for start, end in ranges:
-            state_before = hidden
-            outputs, hidden = self.rnn(
-                self.embedding(input_ids[:, start:end]), hidden
-            )
-            forward_logits.append(self._lm_logits(outputs))
-            if compute_aux:
-                inverse_records.append(
+
+    def _collect_inverse_records(
+        self, input_ids, token_stream, initial_state, trajectory, offsets
+    ):
+        """Select AUX transitions from an already-computed forward trajectory."""
+        records = defaultdict(list)
+        length = input_ids.size(1)
+        for offset in range(self.chunk_size):
+            indices = torch.nonzero(
+                offsets == offset, as_tuple=False
+            ).squeeze(1)
+            if indices.numel() == 0:
+                continue
+            group_inputs = input_ids.index_select(0, indices)
+            group_tokens = token_stream.index_select(0, indices)
+            for start, end in chunk_ranges(length, self.chunk_size, offset):
+                records[end - start].append(
                     (
-                        token_stream[:, start:end],
-                        input_ids[:, start],
-                        state_before,
-                        hidden,
+                        group_tokens[:, start:end],
+                        group_inputs[:, start],
+                        self._state_at(
+                            initial_state, trajectory, start, indices
+                        ),
+                        self._state_at(
+                            initial_state, trajectory, end, indices
+                        ),
                     )
                 )
+        return records
 
-        logits = torch.cat(forward_logits, dim=1)
-        aux_loss = logits.new_zeros(())
-        if not compute_aux:
-            self.metrics = {}
-            self.loss_components = {}
-            return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), hidden
-
+    def _compute_auxiliary_loss(
+        self,
+        input_ids,
+        token_stream,
+        initial_state,
+        trajectory,
+        offsets,
+        logits,
+        compute_diagnostics,
+    ):
+        batch_size, length = input_ids.shape
+        records_by_length = self._collect_inverse_records(
+            input_ids, token_stream, initial_state, trajectory, offsets
+        )
         chunk_logits = []
         chunk_targets = []
         discrete_logits = []
         discrete_targets = []
         memory_targets = []
         memory_estimates = []
-        for inverse_length in sorted(
-            {record[0].size(1) for record in inverse_records}
-        ):
-            records = [
-                record
-                for record in inverse_records
-                if record[0].size(1) == inverse_length
-            ]
+
+        # All records with equal token length share one native inverse-RNN call,
+        # including records selected by different per-sequence offsets.
+        for inverse_length in sorted(records_by_length):
+            records = records_by_length[inverse_length]
             chunks = torch.cat([record[0] for record in records], dim=0)
             boundaries = torch.cat([record[1] for record in records], dim=0)
+            predecessor_states = torch.cat(
+                [record[2] for record in records], dim=1
+            )
             successor_states = torch.cat(
                 [record[3] for record in records], dim=1
             )
             inverse_logits, inverse_targets, reconstructed_states = (
-                self._inverse_record(chunks, boundaries, successor_states)
+                self._inverse_batch(chunks, boundaries, successor_states)
             )
             if inverse_length > 1:
                 chunk_logits.append(inverse_logits[:, :-1])
                 chunk_targets.append(inverse_targets[:, :-1])
             discrete_logits.append(inverse_logits[:, -1:])
             discrete_targets.append(inverse_targets[:, -1:])
-            memory_targets.extend(
+            memory_targets.append(
                 memory_reconstruction_target(
-                    record[2].transpose(0, 1),
+                    predecessor_states.transpose(0, 1),
                     self.stop_gradient_memory_target,
                 )
-                for record in records
             )
-            memory_estimates.extend(
-                value.transpose(0, 1)
-                for value in reconstructed_states.split(batch_size, dim=1)
-            )
+            memory_estimates.append(reconstructed_states.transpose(0, 1))
+
+        # Record counts differ by inverse length and sampled offset. Pooling the
+        # transition-example axis gives the loss helpers one exact rectangular
+        # tensor without padding, repeated forward work, or biased group means.
+        memory_targets = [torch.cat(memory_targets, dim=0)]
+        memory_estimates = [torch.cat(memory_estimates, dim=0)]
 
         sequence_normalizer = float(length)
         loss_chunk = logits.new_zeros(())
@@ -292,62 +349,7 @@ class RNNAuxLM(nn.Module):
                     },
                 }
             )
-        return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), hidden
-
-    def _forward_per_sequence(
-        self,
-        input_ids,
-        targets,
-        aux_tokens,
-        state,
-        compute_aux,
-        compute_diagnostics,
-    ):
-        batch_size, length = input_ids.shape
-        offsets = self._sample_offsets(batch_size, input_ids.device)
-        logits = None
-        terminal_state = None
-        aux_loss = self.embedding.weight.new_zeros(())
-        combined_metrics = {}
-        combined_loss_components = {}
-        for offset in offsets.unique(sorted=True).tolist():
-            indices = torch.nonzero(
-                offsets == offset, as_tuple=False
-            ).squeeze(1)
-            group_state = None if state is None else state.index_select(1, indices)
-            output, group_terminal = self._forward_with_offset(
-                input_ids.index_select(0, indices),
-                None if targets is None else targets.index_select(0, indices),
-                None if aux_tokens is None else aux_tokens.index_select(0, indices),
-                group_state,
-                compute_aux,
-                compute_diagnostics,
-                int(offset),
-            )
-            weight = indices.numel() / batch_size
-            if logits is None:
-                logits = output.logits.new_zeros(
-                    batch_size, length, self.vocab_size
-                )
-                terminal_state = group_terminal.new_zeros(
-                    self.n_layer, batch_size, self.d_model
-                )
-            logits = logits.index_copy(0, indices, output.logits)
-            terminal_state = terminal_state.index_copy(
-                1, indices, group_terminal
-            )
-            aux_loss = aux_loss + output.aux_loss * weight
-            for name, value in self.metrics.items():
-                combined_metrics[name] = combined_metrics.get(
-                    name, value.new_zeros(())
-                ) + value * weight
-            for name, value in self.loss_components.items():
-                combined_loss_components[name] = combined_loss_components.get(
-                    name, value.new_zeros(())
-                ) + value * weight
-        self.metrics = combined_metrics
-        self.loss_components = combined_loss_components
-        return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), terminal_state
+        return aux_loss
 
     def forward(
         self,
@@ -359,22 +361,57 @@ class RNNAuxLM(nn.Module):
         compute_diagnostics=True,
         **kwargs,
     ):
-        if self.chunk_offset == "random" and self.training:
-            return self._forward_per_sequence(
-                input_ids,
-                targets,
-                aux_tokens,
-                state,
-                compute_aux,
-                compute_diagnostics,
-            )
-        offset = 0 if self.chunk_offset == "random" else self.chunk_offset
-        return self._forward_with_offset(
-            input_ids,
-            targets,
-            aux_tokens,
-            state,
-            compute_aux,
-            compute_diagnostics,
-            offset,
+        if input_ids.ndim != 2:
+            raise ValueError("input_ids must have shape (batch, length)")
+        batch_size, length = input_ids.shape
+        if length == 0:
+            raise ValueError("input sequence must be non-empty")
+
+        token_stream = None
+        if compute_aux:
+            token_stream = aux_tokens
+            if (
+                token_stream is None
+                and targets is not None
+                and not torch.any(targets < 0)
+            ):
+                token_stream = targets
+            if token_stream is not None and token_stream.shape != input_ids.shape:
+                raise ValueError("aux_tokens must have the same shape as input_ids")
+            if token_stream is None:
+                raise ValueError(
+                    "unmasked aux_tokens are required when compute_aux=True"
+                )
+
+        initial_state = (
+            self.default_state(batch_size, device=input_ids.device)
+            if state is None
+            else state
         )
+        # The complete forward trajectory is computed exactly once. Offsets are
+        # sampled only afterwards and can therefore never affect LM computation.
+        outputs, terminal_state, trajectory = self.rnn(
+            self.embedding(input_ids),
+            initial_state,
+            return_trajectory=compute_aux,
+        )
+        logits = self._lm_logits(outputs)
+        if not compute_aux:
+            self.metrics = {}
+            self.loss_components = {}
+            return (
+                AuxCausalLMOutput(logits=logits, aux_loss=logits.new_zeros(())),
+                terminal_state,
+            )
+
+        offsets = self._sample_offsets(batch_size, input_ids.device)
+        aux_loss = self._compute_auxiliary_loss(
+            input_ids,
+            token_stream,
+            initial_state,
+            trajectory,
+            offsets,
+            logits,
+            compute_diagnostics,
+        )
+        return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), terminal_state
