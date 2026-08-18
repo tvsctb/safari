@@ -47,6 +47,9 @@ class RNNTrial:
     phase: str
     tau: float = 1.0
     probe_only: bool = False
+    activation: str = "tanh"
+    recurrent_init: str = "orthogonal"
+    recurrent_identity_scale: float = 1.0
 
 
 def make_baseline_trials() -> List[RNNTrial]:
@@ -142,6 +145,9 @@ def build_rnn_command(
         "model.chunk_size=4",
         "model.chunk_offset=random",
         "model.dropout=0.0",
+        f"model.activation={trial.activation}",
+        f"model.recurrent_init={trial.recurrent_init}",
+        f"model.recurrent_identity_scale={trial.recurrent_identity_scale}",
         f"model.rho={trial.rho}",
         f"model.tau={trial.tau}",
         f"model.auxiliary_probe_only={str(trial.probe_only).lower()}",

@@ -14,6 +14,9 @@ model:
   chunk_size: 4
   chunk_offset: random
   dropout: 0.0
+  activation: tanh
+  recurrent_init: orthogonal
+  recurrent_identity_scale: 1.0
   rho: 1.0
   tau: 1.0
   auxiliary_probe_only: false

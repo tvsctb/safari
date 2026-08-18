@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.sequence.rnn_aux import RNNAuxLM, StackedTanhRNN
+from src.models.sequence.rnn_aux import RNNAuxLM, StackedRNN
 
 
 class RNNAuxLMTest(unittest.TestCase):
@@ -25,10 +25,12 @@ class RNNAuxLMTest(unittest.TestCase):
 
     def test_defaults_are_sg_off_random_offset_no_m0_and_learned_terminal(self):
         model = self.make_model()
-        self.assertIs(type(model.rnn), StackedTanhRNN)
+        self.assertIs(type(model.rnn), StackedRNN)
         self.assertIs(type(model.rnn.layers[0]), nn.RNN)
-        self.assertIs(type(model.inverse_rnn), StackedTanhRNN)
+        self.assertIs(type(model.inverse_rnn), StackedRNN)
         self.assertFalse(hasattr(model, "gru"))
+        self.assertEqual(model.rnn.activation, "tanh")
+        self.assertEqual(model.rnn.recurrent_init, "orthogonal")
         self.assertFalse(model.stop_gradient_memory_target)
         self.assertEqual(model.chunk_offset, "random")
         self.assertTrue(model.exclude_initial_memory_reconstruction)
@@ -53,6 +55,51 @@ class RNNAuxLMTest(unittest.TestCase):
         torch.testing.assert_close(outputs[:, 0], expected)
         torch.testing.assert_close(terminal[0], expected)
         torch.testing.assert_close(trajectory[0][:, 0], expected)
+
+    def test_relu_orthogonal_changes_only_the_core_options(self):
+        model = self.make_model(activation="relu", recurrent_init="orthogonal")
+        layer = model.rnn.layers[0]
+        inputs = torch.randn(3, 1, 8)
+        state = torch.randn(1, 3, 8)
+        expected = torch.relu(
+            F.linear(inputs[:, 0], layer.weight_ih_l0, layer.bias_ih_l0)
+            + F.linear(state[0], layer.weight_hh_l0, layer.bias_hh_l0)
+        )
+        outputs, terminal, _ = model.rnn(inputs, state)
+        torch.testing.assert_close(outputs[:, 0], expected)
+        torch.testing.assert_close(terminal[0], expected)
+
+    def test_irnn_recurrent_weights_are_scaled_identities(self):
+        model = RNNAuxLM(
+            d_model=8,
+            n_layer=3,
+            vocab_size=20,
+            chunk_size=4,
+            activation="relu",
+            recurrent_init="identity",
+            recurrent_identity_scale=0.9,
+        )
+        expected = 0.9 * torch.eye(8)
+        for layer in model.rnn.layers:
+            torch.testing.assert_close(layer.weight_hh_l0, expected)
+        for forward, inverse in zip(
+            model.rnn.parameters(), model.inverse_rnn.parameters()
+        ):
+            torch.testing.assert_close(forward, inverse)
+
+    def test_invalid_core_options_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "activation"):
+            self.make_model(activation="gelu")
+        with self.assertRaisesRegex(ValueError, "recurrent_init"):
+            self.make_model(recurrent_init="xavier")
+        with self.assertRaisesRegex(ValueError, "requires relu"):
+            self.make_model(recurrent_init="identity")
+        with self.assertRaisesRegex(ValueError, "recurrent_identity_scale"):
+            self.make_model(
+                activation="relu",
+                recurrent_init="identity",
+                recurrent_identity_scale=0.0,
+            )
 
     def test_stacked_core_matches_native_multilayer_rnn_without_dropout(self):
         model = RNNAuxLM(
@@ -312,19 +359,26 @@ class RNNAuxLMTest(unittest.TestCase):
             batched_state, torch.cat(individual_states, dim=1)
         )
 
-    def test_parameter_matched_default_shape_has_26432_forward_parameters(self):
-        model = RNNAuxLM(
-            d_model=64,
-            n_layer=3,
-            vocab_size=20,
-            chunk_size=4,
+    def test_all_core_options_have_26432_forward_parameters(self):
+        conditions = (
+            {},
+            {"activation": "relu", "recurrent_init": "orthogonal"},
+            {"activation": "relu", "recurrent_init": "identity"},
         )
-        forward_parameters = (
-            model.embedding.weight.numel()
-            + model.initial_state.numel()
-            + sum(parameter.numel() for parameter in model.rnn.parameters())
-        )
-        self.assertEqual(forward_parameters, 26432)
+        for options in conditions:
+            model = RNNAuxLM(
+                d_model=64,
+                n_layer=3,
+                vocab_size=20,
+                chunk_size=4,
+                **options,
+            )
+            forward_parameters = (
+                model.embedding.weight.numel()
+                + model.initial_state.numel()
+                + sum(parameter.numel() for parameter in model.rnn.parameters())
+            )
+            self.assertEqual(forward_parameters, 26432)
 
     def test_fixed_offset_validation(self):
         with self.assertRaisesRegex(ValueError, "chunk_offset"):

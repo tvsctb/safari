@@ -20,25 +20,44 @@ from src.models.sequence.auxiliary import (
 )
 
 
-class StackedTanhRNN(nn.Module):
-    """A stacked vanilla RNN that exposes every layer's state trajectory.
+class StackedRNN(nn.Module):
+    """A configurable stacked vanilla RNN exposing every layer trajectory.
 
     Each layer is evaluated over the complete sequence in one native RNN call.
     This keeps the recurrent computation independent of auxiliary chunking while
     avoiding a Python loop over tokens.
     """
 
-    def __init__(self, d_model, n_layer, dropout=0.0):
+    def __init__(
+        self,
+        d_model,
+        n_layer,
+        dropout=0.0,
+        activation="tanh",
+        recurrent_init="orthogonal",
+        recurrent_identity_scale=1.0,
+    ):
         super().__init__()
+        if activation not in {"tanh", "relu"}:
+            raise ValueError("activation must be tanh or relu")
+        if recurrent_init not in {"orthogonal", "identity"}:
+            raise ValueError("recurrent_init must be orthogonal or identity")
+        if recurrent_init == "identity" and activation != "relu":
+            raise ValueError("identity recurrent initialization requires relu")
+        if recurrent_identity_scale <= 0:
+            raise ValueError("recurrent_identity_scale must be positive")
         self.d_model = d_model
         self.n_layer = n_layer
         self.dropout = float(dropout)
+        self.activation = activation
+        self.recurrent_init = recurrent_init
+        self.recurrent_identity_scale = float(recurrent_identity_scale)
         self.layers = nn.ModuleList(
             nn.RNN(
                 d_model,
                 d_model,
                 num_layers=1,
-                nonlinearity="tanh",
+                nonlinearity=activation,
                 batch_first=True,
             )
             for _ in range(n_layer)
@@ -47,7 +66,12 @@ class StackedTanhRNN(nn.Module):
     def reset_parameters(self):
         for layer in self.layers:
             nn.init.xavier_uniform_(layer.weight_ih_l0)
-            nn.init.orthogonal_(layer.weight_hh_l0)
+            if self.recurrent_init == "orthogonal":
+                nn.init.orthogonal_(layer.weight_hh_l0)
+            else:
+                nn.init.eye_(layer.weight_hh_l0)
+                with torch.no_grad():
+                    layer.weight_hh_l0.mul_(self.recurrent_identity_scale)
             nn.init.zeros_(layer.bias_ih_l0)
             nn.init.zeros_(layer.bias_hh_l0)
 
@@ -90,7 +114,7 @@ class StackedTanhRNN(nn.Module):
 
 
 class RNNAuxLM(nn.Module):
-    """Canonical vanilla-tanh RNN with a chunk-inverse auxiliary objective."""
+    """Vanilla RNN with configurable core initialization and inverse AUX."""
 
     def __init__(
         self,
@@ -100,6 +124,9 @@ class RNNAuxLM(nn.Module):
         chunk_size=4,
         chunk_offset="random",
         dropout=0.0,
+        activation="tanh",
+        recurrent_init="orthogonal",
+        recurrent_identity_scale=1.0,
         rho=1.0,
         tau=1.0,
         auxiliary_probe_only=False,
@@ -164,7 +191,14 @@ class RNNAuxLM(nn.Module):
 
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.initial_state = nn.Parameter(torch.empty(n_layer, 1, d_model))
-        self.rnn = StackedTanhRNN(d_model, n_layer, dropout=dropout)
+        self.rnn = StackedRNN(
+            d_model,
+            n_layer,
+            dropout=dropout,
+            activation=activation,
+            recurrent_init=recurrent_init,
+            recurrent_identity_scale=recurrent_identity_scale,
+        )
         self.inverse_rnn = copy.deepcopy(self.rnn)
         self.memory_predictor = nn.Sequential(
             nn.Linear(d_model, 2 * d_model),
