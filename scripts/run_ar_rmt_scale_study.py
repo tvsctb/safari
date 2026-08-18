@@ -328,6 +328,7 @@ class StudyController:
         group: str,
         command_builder=build_command,
         dry_run: bool = False,
+        deadline_monotonic: Optional[float] = None,
     ):
         self.output_root = output_root
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -336,6 +337,7 @@ class StudyController:
         self.group = group
         self.command_builder = command_builder
         self.dry_run = dry_run
+        self.deadline_monotonic = deadline_monotonic
         self.manifest_path = output_root / "manifest.json"
         self.lock = threading.Lock()
         self.slots = queue.Queue()
@@ -414,6 +416,12 @@ class StudyController:
             )
             rung_attempts = 0
             while True:
+                remaining = None
+                if self.deadline_monotonic is not None:
+                    remaining = self.deadline_monotonic - time.monotonic()
+                    if remaining <= 0:
+                        self._update(trial, status="budget_exhausted")
+                        return False
                 total_attempts += 1
                 rung_attempts += 1
                 command = self.command_builder(
@@ -450,14 +458,19 @@ class StudyController:
                         f"GPU {gpu_id} ===\n"
                     )
                     stream.flush()
-                    completed = subprocess.run(
-                        command,
-                        cwd=Path(__file__).resolve().parents[1],
-                        env=environment,
-                        stdout=stream,
-                        stderr=subprocess.STDOUT,
-                        check=False,
-                    )
+                    try:
+                        completed = subprocess.run(
+                            command,
+                            cwd=Path(__file__).resolve().parents[1],
+                            env=environment,
+                            stdout=stream,
+                            stderr=subprocess.STDOUT,
+                            check=False,
+                            timeout=remaining,
+                        )
+                    except subprocess.TimeoutExpired:
+                        self._update(trial, status="budget_exhausted")
+                        return False
                 if completed.returncode == 0:
                     self._update(
                         trial,

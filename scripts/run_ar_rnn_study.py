@@ -50,6 +50,9 @@ class RNNTrial:
     activation: str = "tanh"
     recurrent_init: str = "orthogonal"
     recurrent_identity_scale: float = 1.0
+    exclude_initial_memory_reconstruction: bool = True
+    use_terminal_loss: bool = True
+    track: str = "legacy"
 
 
 def make_baseline_trials() -> List[RNNTrial]:
@@ -157,8 +160,9 @@ def build_rnn_command(
         "model.use_chunk_loss=true",
         "model.use_discrete_loss=true",
         "model.use_memory_loss=true",
-        "model.exclude_initial_memory_reconstruction=true",
-        "model.use_terminal_loss=true",
+        "model.exclude_initial_memory_reconstruction="
+        f"{str(trial.exclude_initial_memory_reconstruction).lower()}",
+        f"model.use_terminal_loss={str(trial.use_terminal_loss).lower()}",
         f"task.aux_weight={trial.aux_weight}",
         f"task.aux_weight_final={trial.aux_weight}",
         "task.aux_weight_schedule=fixed",
