@@ -18,13 +18,10 @@ SPEC.loader.exec_module(study)
 
 
 def fake_calibration():
-    labels = [study.ratio_label(value) for value in study.TERMINAL_RATIO_TARGETS]
     return {
         core.label: {
-            "taus": {
-                label: float(index + 1) * 10.0
-                for index, label in enumerate(labels)
-            }
+            "median_unit_tau_ratio": 1.0,
+            "reference_aux_weight": study.REFERENCE_AUX_WEIGHT,
         }
         for core in study.CORE_SPECS
     }
@@ -41,7 +38,27 @@ class ArRNNTwoTrackStudyTest(unittest.TestCase):
         self.assertEqual(len(study.flatten_candidates(cores)), 8)
         self.assertIn(0.2, study.LAMBDA_GRID)
         self.assertIn(0.4, study.LAMBDA_GRID)
+        self.assertLess(max(study.TERMINAL_RATIO_TARGETS), 0.001)
         self.assertEqual(study.EXPECTED_UNIQUE_RUNS, 64)
+
+    def test_terminal_tau_is_lambda_aware_and_hits_requested_ratio(self):
+        calibration = fake_calibration()
+        core = study.CORE_SPECS[0]
+        target = study.TERMINAL_RATIO_TARGETS[-1]
+        low = study.calibrated_tau(calibration, core, target, 0.025)
+        high = study.calibrated_tau(calibration, core, target, 0.4)
+        self.assertAlmostEqual(high / low, 4.0)
+        for aux_weight in study.LAMBDA_GRID:
+            tau = study.calibrated_tau(
+                calibration, core, target, aux_weight
+            )
+            realized = (
+                calibration[core.label]["median_unit_tau_ratio"]
+                * aux_weight
+                / study.REFERENCE_AUX_WEIGHT
+                / tau**2
+            )
+            self.assertAlmostEqual(realized, target)
 
     def test_main_conditions_default_to_no_m0_and_terminal_on(self):
         trial = next(

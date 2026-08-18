@@ -39,8 +39,13 @@ SCREEN_EPOCHS = 150
 SHORTLIST_EPOCHS = 250
 RHO = 16.0
 LAMBDA_GRID = (0.025, 0.05, 0.1, 0.2, 0.4)
-TERMINAL_RATIO_TARGETS = (0.001, 0.003, 0.01)
-DEFAULT_TERMINAL_RATIO_TARGET = 0.003
+# Terminal pressure is deliberately kept negligible.  These are weighted
+# terminal/LM forward-gradient ratios (0.01%, 0.03%, 0.08%), all strictly
+# below 0.1%.  Tau is recomputed for every lambda so the terminal-pressure
+# axis and the total-AUX-weight axis remain independent.
+TERMINAL_RATIO_TARGETS = (0.0001, 0.0003, 0.0008)
+DEFAULT_TERMINAL_RATIO_TARGET = 0.0003
+REFERENCE_AUX_WEIGHT = 0.1
 EXPECTED_UNIQUE_RUNS = 64
 
 
@@ -146,18 +151,30 @@ def calibrate_terminal_scales(
         reference_ratio = statistics.median(ratios)
         if not math.isfinite(reference_ratio) or reference_ratio <= 0.0:
             raise RuntimeError(f"invalid terminal calibration for {core.label}")
-        taus = {
-            ratio_label(target): min(
-                max(math.sqrt(reference_ratio / target), 0.25), 1024.0
-            )
-            for target in TERMINAL_RATIO_TARGETS
-        }
         calibration[core.label] = {
             "unit_tau_weighted_terminal_lm_ratios": ratios,
             "median_unit_tau_ratio": reference_ratio,
-            "taus": taus,
+            "reference_aux_weight": REFERENCE_AUX_WEIGHT,
         }
     return calibration
+
+
+def calibrated_tau(
+    calibration: dict,
+    core: CoreSpec,
+    target_ratio: float,
+    aux_weight: float,
+) -> float:
+    """Approximate tau from the existing initial-gradient probe.
+
+    ``median_unit_tau_ratio`` was measured with REFERENCE_AUX_WEIGHT.  The
+    terminal gradient scales linearly with lambda and approximately with
+    inverse tau squared, so this keeps the requested terminal pressure fixed
+    while lambda is varied.
+    """
+    reference_ratio = calibration[core.label]["median_unit_tau_ratio"]
+    scaled_ratio = reference_ratio * aux_weight / REFERENCE_AUX_WEIGHT
+    return min(max(math.sqrt(scaled_ratio / target_ratio), 0.25), 1024.0)
 
 
 def make_trial(
@@ -194,8 +211,12 @@ def make_trial(
 def make_tanh_screen(calibration: dict) -> Dict[str, List[RNNTrial]]:
     core = CORE_SPECS[0]
     candidates = {}
-    for target_name, tau in calibration[core.label]["taus"].items():
+    for target_ratio in TERMINAL_RATIO_TARGETS:
+        target_name = ratio_label(target_ratio)
         for aux_weight in LAMBDA_GRID:
+            tau = calibrated_tau(
+                calibration, core, target_ratio, aux_weight
+            )
             candidate = f"tr{target_name}-lam{value_label(aux_weight)}"
             candidates[candidate] = [
                 make_trial(
@@ -215,9 +236,10 @@ def make_tanh_screen(calibration: dict) -> Dict[str, List[RNNTrial]]:
 
 def make_core_screen(calibration: dict) -> Dict[str, List[RNNTrial]]:
     candidates = {}
-    default_target = ratio_label(DEFAULT_TERMINAL_RATIO_TARGET)
     for core in CORE_SPECS:
-        tau = calibration[core.label]["taus"][default_target]
+        tau = calibrated_tau(
+            calibration, core, DEFAULT_TERMINAL_RATIO_TARGET, 0.1
+        )
         candidates[core.label] = [
             make_trial(
                 f"core-screen-{core.label}-s{seed}",
@@ -239,7 +261,9 @@ def make_irnn_tau_screen(
     calibration: dict, core: CoreSpec
 ) -> Dict[str, List[RNNTrial]]:
     candidates = {}
-    for target_name, tau in calibration[core.label]["taus"].items():
+    for target_ratio in TERMINAL_RATIO_TARGETS:
+        target_name = ratio_label(target_ratio)
+        tau = calibrated_tau(calibration, core, target_ratio, 0.1)
         candidate = f"tr{target_name}"
         candidates[candidate] = [
             make_trial(
