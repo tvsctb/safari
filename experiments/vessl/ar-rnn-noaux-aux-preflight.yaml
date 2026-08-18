@@ -1,4 +1,4 @@
-name: ar-rnn-noaux-aux-preflight-20260819-v2
+name: ar-rnn-noaux-aux-preflight-20260819-v3
 description: Short GPU preflight for the parameter-matched vanilla-RNN no-AUX/AUX study
 resources:
   cluster: yonsei-ai-gpu
@@ -12,13 +12,13 @@ run:
       set -euo pipefail
       git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
       cd /workspace/safari
-      git checkout --detach cb3265d575d64eec44bb25a3cef6fd253adb9a46
-      test "$(git rev-parse HEAD)" = "cb3265d575d64eec44bb25a3cef6fd253adb9a46"
+      git checkout --detach 701d72524c9776c874a60cbe0ae9bbd33b06b735
+      test "$(git rev-parse HEAD)" = "701d72524c9776c874a60cbe0ae9bbd33b06b735"
       test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
       test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
       python -m unittest tests.test_rnn_aux tests.test_aux_models tests.test_ar_rmt_scale_study tests.test_ar_rnn_study
       python scripts/run_ar_rnn_study.py \
-        --output-root /output/ar-rnn-noaux-aux-preflight-20260819-v2 \
+        --output-root /output/ar-rnn-noaux-aux-preflight-20260819-v3 \
         --gpu-ids 0,1 \
         --workers-per-gpu 1 \
         --wandb-project aux-assc-recall \
