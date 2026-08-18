@@ -1,0 +1,65 @@
+# @package _global_
+defaults:
+  - /experiment/synthetics/associative_recall/base.yaml
+
+dataset:
+  return_aux_tokens: true
+  loader_seed: null
+
+model:
+  _name_: rnn_aux_lm
+  d_model: 64
+  n_layer: 1
+  vocab_size: ${dataset.vocab_size}
+  chunk_size: 4
+  chunk_offset: random
+  dropout: 0.0
+  rho: 1.0
+  stop_gradient_memory_target: false
+  stop_gradient_memory_observation: false
+  memory_observation_gradient_scale: 1.0
+  use_chunk_loss: true
+  use_discrete_loss: true
+  use_memory_loss: true
+
+task:
+  _name_: aux_lm
+  loss: cross_entropy
+  aux_weight: 0.1
+  aux_weight_schedule: fixed
+  aux_weight_final: 0.1
+  aux_weight_decay_start_step: 0
+  aux_weight_decay_end_step: 1
+  aux_activation_lm_loss_threshold: null
+  aux_activation_lm_loss_ema_beta: 0.99
+  aux_solved_ce_threshold: null
+  aux_solved_ce_ema_beta: 0.99
+  aux_post_solve_weight: 0.1
+  aux_post_solve_adaptive_end_step: null
+  aux_post_solve_hold_steps: 0
+  aux_post_solve_decay_steps: 1
+  aux_component_weights: {}
+  aux_component_weights_final: {}
+  aux_gradient_norm_interval: 0
+  aux_gradient_norm_steps: []
+  aux_diagnostic_interval: 50
+  torchmetrics: ['perplexity']
+  metrics: ['accuracy_ignore_index']
+
+train:
+  global_batch_size: 32
+  fused_adamw: true
+  log_model_metrics_on_step: false
+
+trainer:
+  gradient_clip_val: 1.0
+
+optimizer:
+  lr: 1e-3
+  weight_decay: 0.1
+
+scheduler:
+  num_warmup_steps: ${eval:${div_up:${dataset.__train_len}, ${train.global_batch_size}} * ${div_up:${trainer.max_epochs}, 5}}
+
+wandb:
+  project: assoc-recall-rnn-aux
