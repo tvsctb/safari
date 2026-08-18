@@ -475,9 +475,11 @@ class AuxLMTask(LMTask):
         if (
             isinstance(aux_diagnostic_interval, bool)
             or not isinstance(aux_diagnostic_interval, int)
-            or aux_diagnostic_interval <= 0
+            or aux_diagnostic_interval < 0
         ):
-            raise ValueError("aux_diagnostic_interval must be a positive integer")
+            raise ValueError(
+                "aux_diagnostic_interval must be a non-negative integer"
+            )
         scheduled_aux_weight(
             aux_weight,
             aux_weight_final,
@@ -689,6 +691,7 @@ class AuxLMTask(LMTask):
         compute_aux = model.training and self._current_aux_weight != 0.0
         compute_diagnostics = (
             compute_aux
+            and self.aux_diagnostic_interval > 0
             and self._aux_diagnostic_step % self.aux_diagnostic_interval == 0
         )
         output, state = model(

@@ -3,7 +3,10 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_ar_rnn_study.py"
@@ -14,6 +17,21 @@ SPEC.loader.exec_module(study)
 
 
 class ArRNNStudyTest(unittest.TestCase):
+    def test_failed_preflight_prints_the_captured_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def fail(command, **kwargs):
+                kwargs["stdout"].write("exact gpu failure\n")
+                return mock.Mock(returncode=7)
+
+            stderr = StringIO()
+            with mock.patch.object(study.subprocess, "run", side_effect=fail):
+                with redirect_stderr(stderr):
+                    with self.assertRaisesRegex(RuntimeError, "returncode=7"):
+                        study.run_preflight(root, 0)
+        self.assertIn("exact gpu failure", stderr.getvalue())
+
     def test_baseline_and_screen_cardinality(self):
         baselines = study.make_baseline_trials()
         screens = study.make_screen_trials(study.RHO_GRID)

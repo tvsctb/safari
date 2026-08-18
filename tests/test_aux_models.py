@@ -227,6 +227,12 @@ class AuxiliaryUtilityTest(unittest.TestCase):
 
 
 class AuxTaskMetricTest(unittest.TestCase):
+    def test_auxiliary_diagnostics_can_be_disabled(self):
+        task = AuxLMTask(loss="cross_entropy", aux_diagnostic_interval=0)
+        self.assertEqual(task.aux_diagnostic_interval, 0)
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            AuxLMTask(loss="cross_entropy", aux_diagnostic_interval=-1)
+
     def test_auxiliary_lm_loss_gate_latches_and_starts_schedule_at_zero(self):
         task = AuxLMTask(
             loss="cross_entropy",

@@ -214,7 +214,18 @@ def run_preflight(output_root: Path, gpu_id: int):
         or not (trial_root / "result.json").exists()
         or not (trial_root / "checkpoints" / "last.ckpt").exists()
     ):
-        raise RuntimeError(f"RNN GPU preflight failed; inspect {log_path}")
+        log = log_path.read_text(encoding="utf-8", errors="replace")
+        print(
+            f"RNN GPU preflight log ({log_path}):\n{log}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise RuntimeError(
+            "RNN GPU preflight failed: "
+            f"returncode={completed.returncode}, "
+            f"result={bool((trial_root / 'result.json').exists())}, "
+            f"checkpoint={bool((trial_root / 'checkpoints' / 'last.ckpt').exists())}"
+        )
     marker.write_text("ok\n", encoding="utf-8")
 
 
@@ -330,6 +341,7 @@ def parse_args():
         "--wandb-group", default="ar-rnn-noaux-aux-scale-20260819-v1"
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true")
     return parser.parse_args()
 
 
@@ -366,6 +378,9 @@ def main():
         raise ValueError("workers-per-gpu must be positive")
 
     run_preflight(args.output_root, gpu_ids[0])
+    if args.preflight_only:
+        print(args.output_root / "preflight" / "PREFLIGHT_OK")
+        return 0
     controller = StudyController(
         output_root=args.output_root,
         gpu_ids=gpu_ids,
