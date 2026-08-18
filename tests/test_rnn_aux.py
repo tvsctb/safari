@@ -23,7 +23,7 @@ class RNNAuxLMTest(unittest.TestCase):
             **options,
         )
 
-    def test_defaults_are_sg_off_random_offset_and_no_terminal(self):
+    def test_defaults_are_sg_off_random_offset_no_m0_and_learned_terminal(self):
         model = self.make_model()
         self.assertIs(type(model.rnn), StackedTanhRNN)
         self.assertIs(type(model.rnn.layers[0]), nn.RNN)
@@ -31,8 +31,12 @@ class RNNAuxLMTest(unittest.TestCase):
         self.assertFalse(hasattr(model, "gru"))
         self.assertFalse(model.stop_gradient_memory_target)
         self.assertEqual(model.chunk_offset, "random")
-        self.assertFalse(hasattr(model, "terminal_target"))
-        self.assertFalse(hasattr(model, "tau"))
+        self.assertTrue(model.exclude_initial_memory_reconstruction)
+        self.assertTrue(model.use_terminal_loss)
+        self.assertFalse(model.auxiliary_probe_only)
+        self.assertIsInstance(model.terminal_target, nn.Parameter)
+        self.assertEqual(tuple(model.terminal_target.shape), (1, 1, 8))
+        self.assertEqual(model.tau.item(), 1.0)
 
     def test_core_transition_matches_vanilla_tanh_equation(self):
         model = self.make_model()
@@ -103,7 +107,7 @@ class RNNAuxLMTest(unittest.TestCase):
         hidden = torch.randn(1, 3, 8)
         torch.testing.assert_close(model._predict_memory(hidden), hidden)
 
-    def test_forward_has_three_aux_components_and_finite_diagnostics(self):
+    def test_forward_has_four_aux_components_and_finite_diagnostics(self):
         model = self.make_model(chunk_offset=0)
         output, state = model(
             self.inputs,
@@ -116,9 +120,15 @@ class RNNAuxLMTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(output.aux_loss))
         self.assertEqual(
             set(model.loss_components),
-            {"chunk_ce", "discrete_ce", "memory_nll", "total"},
+            {
+                "chunk_ce",
+                "discrete_ce",
+                "memory_nll",
+                "terminal_nll",
+                "total",
+            },
         )
-        self.assertNotIn("terminal_nll", model.loss_components)
+        self.assertTrue(torch.isfinite(model.loss_components["terminal_nll"]))
         self.assertTrue(
             torch.isfinite(model.metrics["aux/memory_relative_mse"])
         )
@@ -331,6 +341,7 @@ class RNNAuxLMTest(unittest.TestCase):
             stop_gradient_memory_observation=True,
             use_chunk_loss=False,
             use_discrete_loss=False,
+            use_terminal_loss=False,
         )
         on = self.make_model(
             chunk_offset=0,
@@ -338,10 +349,11 @@ class RNNAuxLMTest(unittest.TestCase):
             stop_gradient_memory_observation=True,
             use_chunk_loss=False,
             use_discrete_loss=False,
+            use_terminal_loss=False,
         )
         on.load_state_dict(off.state_dict())
-        short_inputs = self.inputs[:, :4]
-        short_targets = self.targets[:, :4]
+        short_inputs = self.inputs[:, :8]
+        short_targets = self.targets[:, :8]
 
         off_output, _ = off(
             short_inputs, targets=short_targets, aux_tokens=short_targets
@@ -361,6 +373,7 @@ class RNNAuxLMTest(unittest.TestCase):
             chunk_offset=0,
             use_chunk_loss=False,
             use_discrete_loss=False,
+            use_terminal_loss=False,
         )
         baseline, _ = model(
             self.inputs,
@@ -383,6 +396,7 @@ class RNNAuxLMTest(unittest.TestCase):
             chunk_offset=0,
             use_chunk_loss=False,
             use_discrete_loss=False,
+            use_terminal_loss=False,
         )
         output, _ = model(
             self.inputs,
@@ -392,6 +406,164 @@ class RNNAuxLMTest(unittest.TestCase):
         output.aux_loss.backward()
         self.assertGreater(
             model.memory_predictor[2].weight.grad.norm().item(), 0.0
+        )
+
+    def test_initial_memory_reconstruction_is_optional_and_off_by_default(self):
+        excluded = self.make_model(
+            chunk_offset=0,
+            use_chunk_loss=False,
+            use_discrete_loss=False,
+            use_terminal_loss=False,
+        )
+        included = self.make_model(
+            chunk_offset=0,
+            use_chunk_loss=False,
+            use_discrete_loss=False,
+            use_terminal_loss=False,
+            exclude_initial_memory_reconstruction=False,
+        )
+        included.load_state_dict(excluded.state_dict())
+        short_inputs = self.inputs[:, :4]
+        short_targets = self.targets[:, :4]
+
+        excluded_output, _ = excluded(
+            short_inputs, targets=short_targets, aux_tokens=short_targets
+        )
+        included_output, _ = included(
+            short_inputs, targets=short_targets, aux_tokens=short_targets
+        )
+        torch.testing.assert_close(
+            excluded_output.aux_loss,
+            excluded_output.aux_loss.new_zeros(()),
+        )
+        self.assertGreater(included_output.aux_loss.item(), 0.0)
+
+        token_only = self.make_model(
+            chunk_offset=0,
+            use_memory_loss=False,
+            use_terminal_loss=False,
+        )
+        token_output, _ = token_only(
+            short_inputs, targets=short_targets, aux_tokens=short_targets
+        )
+        self.assertGreater(token_output.aux_loss.item(), 0.0)
+
+    def test_terminal_target_is_learned(self):
+        model = self.make_model(
+            chunk_offset=0,
+            use_chunk_loss=False,
+            use_discrete_loss=False,
+            use_memory_loss=False,
+        )
+        output, _ = model(
+            self.inputs,
+            targets=self.targets,
+            aux_tokens=self.targets,
+        )
+        output.aux_loss.backward()
+        self.assertGreater(model.terminal_target.grad.norm().item(), 0.0)
+        self.assertGreater(model.initial_state.grad.norm().item(), 0.0)
+
+    def test_probe_only_aux_has_exactly_the_lm_forward_gradient(self):
+        baseline = self.make_model(chunk_offset=0)
+        probe = self.make_model(chunk_offset=0, auxiliary_probe_only=True)
+        probe.load_state_dict(baseline.state_dict())
+
+        baseline_output, _ = baseline(self.inputs, compute_aux=False)
+        baseline_lm = F.cross_entropy(
+            baseline_output.logits.flatten(0, 1), self.targets.flatten()
+        )
+        probe_output, _ = probe(
+            self.inputs,
+            targets=self.targets,
+            aux_tokens=self.targets,
+            compute_aux=True,
+        )
+        probe_lm = F.cross_entropy(
+            probe_output.logits.flatten(0, 1), self.targets.flatten()
+        )
+
+        def forward_parameters(model):
+            return (
+                model.embedding.weight,
+                model.initial_state,
+                *tuple(model.rnn.parameters()),
+            )
+
+        baseline_gradients = torch.autograd.grad(
+            baseline_lm, forward_parameters(baseline)
+        )
+        probe_gradients = torch.autograd.grad(
+            probe_lm + 0.1 * probe_output.aux_loss,
+            forward_parameters(probe),
+            retain_graph=True,
+        )
+        for actual, expected in zip(probe_gradients, baseline_gradients):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        inverse_gradients = torch.autograd.grad(
+            probe_output.aux_loss,
+            (*tuple(probe.inverse_rnn.parameters()), probe.terminal_target),
+            allow_unused=True,
+        )
+        self.assertTrue(
+            any(
+                gradient is not None and gradient.norm().item() > 0.0
+                for gradient in inverse_gradients
+            )
+        )
+
+    def test_probe_only_adamw_step_leaves_forward_trajectory_unchanged(self):
+        baseline = self.make_model(chunk_offset=0)
+        probe = self.make_model(chunk_offset=0, auxiliary_probe_only=True)
+        probe.load_state_dict(baseline.state_dict())
+        baseline_optimizer = torch.optim.AdamW(
+            baseline.parameters(), lr=1e-3, weight_decay=0.1
+        )
+        probe_optimizer = torch.optim.AdamW(
+            probe.parameters(), lr=1e-3, weight_decay=0.1
+        )
+
+        baseline_output, _ = baseline(self.inputs, compute_aux=False)
+        baseline_loss = F.cross_entropy(
+            baseline_output.logits.flatten(0, 1), self.targets.flatten()
+        )
+        baseline_loss.backward()
+        baseline_optimizer.step()
+
+        probe_output, _ = probe(
+            self.inputs,
+            targets=self.targets,
+            aux_tokens=self.targets,
+            compute_aux=True,
+        )
+        probe_loss = F.cross_entropy(
+            probe_output.logits.flatten(0, 1), self.targets.flatten()
+        ) + 0.1 * probe_output.aux_loss
+        probe_loss.backward()
+        probe_optimizer.step()
+
+        baseline_forward = (
+            baseline.embedding.weight,
+            baseline.initial_state,
+            *tuple(baseline.rnn.parameters()),
+        )
+        probe_forward = (
+            probe.embedding.weight,
+            probe.initial_state,
+            *tuple(probe.rnn.parameters()),
+        )
+        for actual, expected in zip(probe_forward, baseline_forward):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        self.assertTrue(
+            any(
+                not torch.equal(actual, expected)
+                for actual, expected in zip(
+                    probe.inverse_rnn.parameters(),
+                    baseline.inverse_rnn.parameters(),
+                )
+            )
         )
 
 

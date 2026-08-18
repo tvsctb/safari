@@ -58,23 +58,30 @@ class ArRNNStudyTest(unittest.TestCase):
         self.assertIn("model.n_layer=3", command)
         self.assertIn("model.chunk_offset=random", command)
         self.assertIn("model.rho=1.0", command)
+        self.assertIn("model.tau=1.0", command)
+        self.assertIn("model.auxiliary_probe_only=false", command)
         self.assertIn("model.stop_gradient_memory_target=false", command)
         self.assertIn("model.use_chunk_loss=true", command)
         self.assertIn("model.use_discrete_loss=true", command)
         self.assertIn("model.use_memory_loss=true", command)
+        self.assertIn(
+            "model.exclude_initial_memory_reconstruction=true", command
+        )
+        self.assertIn("model.use_terminal_loss=true", command)
         self.assertIn("task.aux_weight=0.1", command)
         self.assertIn("task.aux_gradient_norm_interval=1570", command)
-        self.assertNotIn("terminal", "\n".join(command))
 
-    def test_noaux_command_disables_aux_execution_and_diagnostics(self):
+    def test_noaux_command_trains_online_detached_inverse_probe(self):
         trial = study.make_baseline_trials()[0]
         with tempfile.TemporaryDirectory() as directory:
             command = study.build_rnn_command(
                 trial, Path(directory), "project", "entity", "group"
             )
-        self.assertIn("task.aux_weight=0.0", command)
-        self.assertIn("task.aux_gradient_norm_interval=0", command)
-        self.assertIn("task.aux_diagnostic_interval=0", command)
+        self.assertIn("model.auxiliary_probe_only=true", command)
+        self.assertIn("model.rho=16.0", command)
+        self.assertIn("task.aux_weight=0.1", command)
+        self.assertIn("task.aux_gradient_norm_interval=1570", command)
+        self.assertIn("task.aux_diagnostic_interval=157", command)
 
     def test_ranking_uses_mean_accuracy_then_loss(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -104,7 +111,7 @@ class ArRNNStudyTest(unittest.TestCase):
             ranking = study.rank_rhos(root, values)
         self.assertEqual(ranking[0]["rho"], 1.0)
 
-    def test_report_records_parameter_match_and_no_terminal(self):
+    def test_report_records_parameter_match_terminal_and_detached_probe(self):
         with tempfile.TemporaryDirectory() as directory:
             report = study.build_report(
                 Path(directory),
@@ -113,7 +120,14 @@ class ArRNNStudyTest(unittest.TestCase):
                 1.0,
             )
         self.assertEqual(report["condition"]["forward_parameters"], 26432)
-        self.assertFalse(report["condition"]["terminal_loss"])
+        self.assertTrue(report["condition"]["terminal_loss"])
+        self.assertEqual(report["condition"]["terminal_target"], "learned")
+        self.assertTrue(
+            report["condition"]["exclude_initial_memory_reconstruction"]
+        )
+        self.assertEqual(
+            report["condition"]["baseline_inverse_probe"], "online_detached"
+        )
         self.assertFalse(report["condition"]["target_sg"])
 
 

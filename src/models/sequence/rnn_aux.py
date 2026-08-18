@@ -14,6 +14,8 @@ from src.models.sequence.auxiliary import (
     memory_observation,
     memory_reconstruction_diagnostics,
     memory_reconstruction_target,
+    terminal_gaussian_nll,
+    terminal_reconstruction_mse,
     validate_memory_observation_gradient_scale,
 )
 
@@ -99,12 +101,16 @@ class RNNAuxLM(nn.Module):
         chunk_offset="random",
         dropout=0.0,
         rho=1.0,
+        tau=1.0,
+        auxiliary_probe_only=False,
         stop_gradient_memory_target=False,
         stop_gradient_memory_observation=False,
         memory_observation_gradient_scale=1.0,
         use_chunk_loss=True,
         use_discrete_loss=True,
         use_memory_loss=True,
+        exclude_initial_memory_reconstruction=True,
+        use_terminal_loss=True,
         **kwargs,
     ):
         super().__init__()
@@ -118,8 +124,14 @@ class RNNAuxLM(nn.Module):
             raise ValueError("chunk_size must be greater than 1")
         if not 0.0 <= float(dropout) < 1.0:
             raise ValueError("dropout must be in [0, 1)")
-        if rho <= 0:
-            raise ValueError("rho must be positive")
+        if rho <= 0 or tau <= 0:
+            raise ValueError("rho and tau must be positive")
+        if not isinstance(auxiliary_probe_only, bool):
+            raise ValueError("auxiliary_probe_only must be a boolean")
+        if not isinstance(exclude_initial_memory_reconstruction, bool):
+            raise ValueError(
+                "exclude_initial_memory_reconstruction must be a boolean"
+            )
         if chunk_offset != "random":
             if isinstance(chunk_offset, bool) or not isinstance(chunk_offset, int):
                 raise ValueError(
@@ -134,6 +146,7 @@ class RNNAuxLM(nn.Module):
         self.vocab_size = vocab_size
         self.chunk_size = chunk_size
         self.chunk_offset = chunk_offset
+        self.auxiliary_probe_only = auxiliary_probe_only
         self.stop_gradient_memory_target = stop_gradient_memory_target
         self.stop_gradient_memory_observation = stop_gradient_memory_observation
         self.memory_observation_gradient_scale = (
@@ -144,6 +157,10 @@ class RNNAuxLM(nn.Module):
         self.use_chunk_loss = use_chunk_loss
         self.use_discrete_loss = use_discrete_loss
         self.use_memory_loss = use_memory_loss
+        self.exclude_initial_memory_reconstruction = (
+            exclude_initial_memory_reconstruction
+        )
+        self.use_terminal_loss = use_terminal_loss
 
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.initial_state = nn.Parameter(torch.empty(n_layer, 1, d_model))
@@ -154,7 +171,14 @@ class RNNAuxLM(nn.Module):
             nn.GELU(),
             nn.Linear(2 * d_model, d_model),
         )
+        # The terminal prior mean is always learned.  Keeping it allocated when
+        # the terminal term is disabled makes parameterization identical across
+        # terminal-loss ablations and detached no-AUX probes.
+        self.terminal_target = nn.Parameter(
+            torch.zeros(n_layer, 1, d_model)
+        )
         self.register_buffer("rho", torch.tensor(float(rho)))
+        self.register_buffer("tau", torch.tensor(float(tau)))
         self.reset_parameters()
         self.metrics = {}
         self.loss_components = {}
@@ -162,6 +186,7 @@ class RNNAuxLM(nn.Module):
     def reset_parameters(self):
         nn.init.normal_(self.embedding.weight, std=0.02)
         nn.init.normal_(self.initial_state, std=0.02)
+        nn.init.zeros_(self.terminal_target)
         self.rnn.reset_parameters()
         self.inverse_rnn.load_state_dict(self.rnn.state_dict())
 
@@ -175,6 +200,18 @@ class RNNAuxLM(nn.Module):
 
     def _lm_logits(self, hidden):
         return F.linear(hidden, self.embedding.weight)
+
+    def _inverse_embedding(self, token_ids):
+        weight = self.embedding.weight
+        if self.auxiliary_probe_only:
+            weight = weight.detach()
+        return F.embedding(token_ids, weight)
+
+    def _inverse_logits(self, hidden):
+        weight = self.embedding.weight
+        if self.auxiliary_probe_only:
+            weight = weight.detach()
+        return F.linear(hidden, weight)
 
     def _predict_memory(self, hidden):
         return hidden + self.memory_predictor(hidden)
@@ -198,16 +235,23 @@ class RNNAuxLM(nn.Module):
 
     def _inverse_batch(self, chunks, boundaries, successor_states):
         data_ids, inverse_targets = boundary_inverse_targets(chunks, boundaries)
-        observed_states = memory_observation(
-            successor_states,
-            self.stop_gradient_memory_observation,
-            self.memory_observation_gradient_scale,
-        )
+        if self.auxiliary_probe_only:
+            observed_states = successor_states.detach()
+        else:
+            observed_states = memory_observation(
+                successor_states,
+                self.stop_gradient_memory_observation,
+                self.memory_observation_gradient_scale,
+            )
         inverse_outputs, inverse_state, _ = self.inverse_rnn(
-            self.embedding(data_ids), observed_states
+            self._inverse_embedding(data_ids), observed_states
         )
         reconstructed_state = self._predict_memory(inverse_state)
-        return self._lm_logits(inverse_outputs), inverse_targets, reconstructed_state
+        return (
+            self._inverse_logits(inverse_outputs),
+            inverse_targets,
+            reconstructed_state,
+        )
 
     @staticmethod
     def _state_at(initial_state, trajectory, position, indices):
@@ -246,6 +290,7 @@ class RNNAuxLM(nn.Module):
                         self._state_at(
                             initial_state, trajectory, end, indices
                         ),
+                        start != 0,
                     )
                 )
         return records
@@ -291,19 +336,47 @@ class RNNAuxLM(nn.Module):
                 chunk_targets.append(inverse_targets[:, :-1])
             discrete_logits.append(inverse_logits[:, -1:])
             discrete_targets.append(inverse_targets[:, -1:])
-            memory_targets.append(
-                memory_reconstruction_target(
-                    predecessor_states.transpose(0, 1),
-                    self.stop_gradient_memory_target,
-                )
+            # By default M_1 -> M_0 remains a token-reconstruction transition,
+            # but the learned initial state is excluded from the Gaussian
+            # memory term.  The option can restore the legacy M_0 term for a
+            # controlled ablation.
+            memory_mask = torch.cat(
+                [
+                    torch.full(
+                        (record[0].size(0),),
+                        record[4]
+                        or not self.exclude_initial_memory_reconstruction,
+                        device=chunks.device,
+                        dtype=torch.bool,
+                    )
+                    for record in records
+                ]
             )
-            memory_estimates.append(reconstructed_states.transpose(0, 1))
+            if memory_mask.any():
+                memory_target = predecessor_states.transpose(0, 1).index_select(
+                    0, torch.nonzero(memory_mask, as_tuple=False).squeeze(1)
+                )
+                memory_estimate = reconstructed_states.transpose(0, 1).index_select(
+                    0, torch.nonzero(memory_mask, as_tuple=False).squeeze(1)
+                )
+                memory_targets.append(
+                    memory_reconstruction_target(
+                        memory_target,
+                        self.stop_gradient_memory_target
+                        or self.auxiliary_probe_only,
+                    )
+                )
+                memory_estimates.append(memory_estimate)
 
         # Record counts differ by inverse length and sampled offset. Pooling the
         # transition-example axis gives the loss helpers one exact rectangular
         # tensor without padding, repeated forward work, or biased group means.
-        memory_targets = [torch.cat(memory_targets, dim=0)]
-        memory_estimates = [torch.cat(memory_estimates, dim=0)]
+        memory_targets = (
+            [torch.cat(memory_targets, dim=0)] if memory_targets else []
+        )
+        memory_estimates = (
+            [torch.cat(memory_estimates, dim=0)] if memory_estimates else []
+        )
 
         sequence_normalizer = float(length)
         loss_chunk = logits.new_zeros(())
@@ -326,20 +399,41 @@ class RNNAuxLM(nn.Module):
                 batch_size,
                 scale_axis=1,
             ) / sequence_normalizer
-        aux_loss = loss_chunk + loss_discrete + loss_memory
+        loss_terminal = logits.new_zeros(())
+        if self.use_terminal_loss:
+            terminal_value = torch.stack(
+                [layer_states[:, -1] for layer_states in trajectory], dim=0
+            )
+            if self.auxiliary_probe_only:
+                terminal_value = terminal_value.detach()
+            loss_terminal = terminal_gaussian_nll(
+                terminal_value,
+                self.tau,
+                batch_size,
+                scale_axis=0,
+                target=self.terminal_target,
+            ) / sequence_normalizer
+        aux_loss = loss_chunk + loss_discrete + loss_memory + loss_terminal
         self.loss_components = {
             "chunk_ce": loss_chunk,
             "discrete_ce": loss_discrete,
             "memory_nll": loss_memory,
+            "terminal_nll": loss_terminal,
             "total": aux_loss,
         }
         self.metrics = {
             "aux/chunk_ce": loss_chunk.detach(),
             "aux/discrete_ce": loss_discrete.detach(),
             "aux/memory_nll": loss_memory.detach(),
+            "aux/terminal_nll": loss_terminal.detach(),
             "aux/total": aux_loss.detach(),
             "aux/rho": self.rho.detach().reshape(()),
             "aux/rho_mean": self.rho.detach().reshape(()),
+            "aux/tau": self.tau.detach().reshape(()),
+            "aux/tau_mean": self.tau.detach().reshape(()),
+            "aux/probe_only": logits.detach().new_tensor(
+                float(self.auxiliary_probe_only)
+            ),
         }
         if compute_diagnostics:
             diagnostics = memory_reconstruction_diagnostics(
@@ -354,6 +448,24 @@ class RNNAuxLM(nn.Module):
                         f"aux/memory_{name}": value
                         for name, value in diagnostics.items()
                     },
+                }
+            )
+            terminal_value = torch.stack(
+                [layer_states[:, -1] for layer_states in trajectory], dim=0
+            )
+            self.metrics.update(
+                {
+                    "aux/terminal_reconstruction_mse": (
+                        terminal_reconstruction_mse(
+                            terminal_value, self.terminal_target
+                        )
+                    ),
+                    "aux/terminal_state_second_moment": (
+                        terminal_value.detach().float().square().mean()
+                    ),
+                    "aux/terminal_target_second_moment": (
+                        self.terminal_target.detach().float().square().mean()
+                    ),
                 }
             )
         return aux_loss

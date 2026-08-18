@@ -15,12 +15,16 @@ model:
   chunk_offset: random
   dropout: 0.0
   rho: 1.0
+  tau: 1.0
+  auxiliary_probe_only: false
   stop_gradient_memory_target: false
   stop_gradient_memory_observation: false
   memory_observation_gradient_scale: 1.0
   use_chunk_loss: true
   use_discrete_loss: true
   use_memory_loss: true
+  exclude_initial_memory_reconstruction: true
+  use_terminal_loss: true
 
 task:
   _name_: aux_lm

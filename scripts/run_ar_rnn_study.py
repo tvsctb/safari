@@ -45,6 +45,8 @@ class RNNTrial:
     aux_weight: float
     rho: float
     phase: str
+    tau: float = 1.0
+    probe_only: bool = False
 
 
 def make_baseline_trials() -> List[RNNTrial]:
@@ -53,9 +55,13 @@ def make_baseline_trials() -> List[RNNTrial]:
             trial_id=f"rnn-noaux-parammatched-s{seed}",
             seed=seed,
             max_epochs=FULL_EPOCHS,
-            aux_weight=0.0,
-            rho=1.0,
+            # The inverse probe trains online, but every path from it into the
+            # forward RNN is detached.  Thus this remains an exact no-forward-
+            # AUX baseline while yielding matched reconstruction telemetry.
+            aux_weight=0.1,
+            rho=16.0,
             phase="baseline",
+            probe_only=True,
         )
         for seed in BASELINE_SEEDS
     ]
@@ -137,12 +143,16 @@ def build_rnn_command(
         "model.chunk_offset=random",
         "model.dropout=0.0",
         f"model.rho={trial.rho}",
+        f"model.tau={trial.tau}",
+        f"model.auxiliary_probe_only={str(trial.probe_only).lower()}",
         "model.stop_gradient_memory_target=false",
         "model.stop_gradient_memory_observation=false",
         "model.memory_observation_gradient_scale=1.0",
         "model.use_chunk_loss=true",
         "model.use_discrete_loss=true",
         "model.use_memory_loss=true",
+        "model.exclude_initial_memory_reconstruction=true",
+        "model.use_terminal_loss=true",
         f"task.aux_weight={trial.aux_weight}",
         f"task.aux_weight_final={trial.aux_weight}",
         "task.aux_weight_schedule=fixed",
@@ -313,8 +323,12 @@ def build_report(output_root: Path, baseline_trials, selected_trials, rho: float
             "warmup_steps": FULL_WARMUP_STEPS,
             "aux_weight": 0.1,
             "selected_rho": rho,
+            "tau": 1.0,
             "target_sg": False,
-            "terminal_loss": False,
+            "terminal_loss": True,
+            "terminal_target": "learned",
+            "exclude_initial_memory_reconstruction": True,
+            "baseline_inverse_probe": "online_detached",
             "seeds": list(BASELINE_SEEDS),
         },
         "baseline": baseline,
