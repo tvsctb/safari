@@ -1,0 +1,32 @@
+name: ar-rnn-tanh-irnn-auto5h-preflight-20260819-v1
+description: GPU preflight for the independent tanh-objective and iRNN automatic study
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-2
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach f1b397c5438bdc50f5dab7ea649c008e99561158
+      test "$(git rev-parse HEAD)" = "f1b397c5438bdc50f5dab7ea649c008e99561158"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_rnn_aux \
+        tests.test_ar_rmt_scale_study \
+        tests.test_ar_rnn_study \
+        tests.test_ar_rnn_two_track_study
+      PYTHONPATH=.:scripts python scripts/run_ar_rnn_two_track_study.py \
+        --output-root /output/ar-rnn-tanh-irnn-auto5h-preflight-20260819-v1 \
+        --gpu-ids 0,1 \
+        --workers-per-gpu 8 \
+        --wandb-project aux-assc-recall \
+        --wandb-entity bjjin07-x \
+        --wandb-group-prefix unused-preflight \
+        --preflight-only
+    workdir: /workspace
