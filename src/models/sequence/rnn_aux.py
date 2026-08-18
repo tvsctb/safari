@@ -64,8 +64,15 @@ class StackedTanhRNN(nn.Module):
                 layer_input = F.dropout(
                     layer_input, p=self.dropout, training=self.training
                 )
+            # Learned initial states are broadcast across the batch with
+            # ``expand``. CPU kernels accept that zero-stride view, whereas
+            # cuDNN requires a contiguous hidden state. Materialize only the
+            # per-layer state at the native-RNN boundary; values and gradients
+            # remain identical, including accumulation into the shared
+            # learned initial state.
+            layer_state = state[index : index + 1].contiguous()
             layer_output, terminal_state = layer(
-                layer_input, state[index : index + 1]
+                layer_input, layer_state
             )
             terminal_states.append(terminal_state)
             if return_trajectory:

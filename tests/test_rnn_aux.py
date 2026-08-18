@@ -80,6 +80,15 @@ class RNNAuxLMTest(unittest.TestCase):
         torch.testing.assert_close(actual_output, expected_output)
         torch.testing.assert_close(actual_state, expected_state)
 
+    def test_native_rnn_receives_contiguous_expanded_initial_state(self):
+        model = self.make_model()
+        initial = model.default_state(self.inputs.size(0))
+        self.assertFalse(initial.is_contiguous())
+        layer = model.rnn.layers[0]
+        with mock.patch.object(layer, "forward", wraps=layer.forward) as call:
+            model.rnn(model.embedding(self.inputs), initial)
+        self.assertTrue(call.call_args.args[1].is_contiguous())
+
     def test_forward_inverse_are_unshared_with_identical_initialization(self):
         model = self.make_model()
         self.assertIsNot(model.rnn, model.inverse_rnn)
