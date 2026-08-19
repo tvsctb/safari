@@ -1,0 +1,36 @@
+name: ar-irnn-long-memory-20260819-v1
+description: Isolated iRNN memory-pressure, inverse-boundary, and chunk-size study
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-2
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach 4a5d2b1
+      test "$(git rev-parse HEAD)" = "4a5d2b190d5eb2be8df30479c891f87c2b8a4a58"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_rnn_aux \
+        tests.test_ar_rnn_study \
+        tests.test_controlled_assoc_recall \
+        tests.test_ar_rnn_controlled_lag_study \
+        tests.test_ar_irnn_long_memory_study
+      PYTHONPATH=.:scripts python scripts/run_ar_irnn_long_memory_study.py \
+        --output-root /output/ar-irnn-long-memory-20260819-v1 \
+        --gpu-ids 0,1 \
+        --workers-per-gpu 8 \
+        --wandb-project aux-assc-recall \
+        --wandb-entity bjjin07-x \
+        --training-group ar-irnn-long-memory-train-20260819-v1 \
+        --eval-group ar-irnn-long-memory-eval-20260819-v1 \
+        --examples-per-lag 10000 \
+        --base-batch-size 128 \
+        --dataset-seed 20260819
+    workdir: /workspace
