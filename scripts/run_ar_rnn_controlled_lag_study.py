@@ -81,6 +81,7 @@ def evaluation_command(
         "--recurrent-identity-scale", str(trial.recurrent_identity_scale),
         "--rho", str(trial.rho),
         "--tau", str(trial.tau),
+        "--chunk-size", str(trial.chunk_size),
         "--examples-per-lag", str(args.examples_per_lag),
         "--base-batch-size", str(args.base_batch_size),
         "--dataset-seed", str(args.dataset_seed),
@@ -91,6 +92,8 @@ def evaluation_command(
     ]
     if trial.probe_only:
         command.append("--probe-only")
+    if trial.condition_memory_reconstruction_on_boundary:
+        command.append("--condition-memory-reconstruction-on-boundary")
     return command
 
 

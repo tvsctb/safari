@@ -44,7 +44,7 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
         d_model=64,
         n_layer=3,
         vocab_size=20,
-        chunk_size=4,
+        chunk_size=args.chunk_size,
         chunk_offset="random",
         dropout=0.0,
         activation=args.activation,
@@ -61,6 +61,9 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
         use_memory_loss=True,
         exclude_initial_memory_reconstruction=True,
         use_terminal_loss=True,
+        condition_memory_reconstruction_on_boundary=(
+            args.condition_memory_reconstruction_on_boundary
+        ),
     )
     checkpoint = torch.load(path, map_location="cpu")
     state = checkpoint.get("state_dict", checkpoint)
@@ -155,6 +158,10 @@ def log_wandb(report: dict, checkpoint: Path, args: argparse.Namespace) -> None:
         "probe_only": args.probe_only,
         "rho": args.rho,
         "tau": args.tau,
+        "chunk_size": args.chunk_size,
+        "condition_memory_reconstruction_on_boundary": (
+            args.condition_memory_reconstruction_on_boundary
+        ),
         **report["protocol"],
     }
     with wandb.init(
@@ -203,6 +210,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--probe-only", action="store_true")
     parser.add_argument("--rho", type=float, default=16.0)
     parser.add_argument("--tau", type=float, required=True)
+    parser.add_argument("--chunk-size", type=int, default=4)
+    parser.add_argument(
+        "--condition-memory-reconstruction-on-boundary", action="store_true"
+    )
     parser.add_argument("--examples-per-lag", type=int, default=10000)
     parser.add_argument("--base-batch-size", type=int, default=128)
     parser.add_argument("--dataset-seed", type=int, default=20260819)

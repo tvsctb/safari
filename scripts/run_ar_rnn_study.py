@@ -52,6 +52,8 @@ class RNNTrial:
     recurrent_identity_scale: float = 1.0
     exclude_initial_memory_reconstruction: bool = True
     use_terminal_loss: bool = True
+    chunk_size: int = 4
+    condition_memory_reconstruction_on_boundary: bool = False
     track: str = "legacy"
 
 
@@ -145,7 +147,7 @@ def build_rnn_command(
         "optimizer.weight_decay=0.1",
         "model.d_model=64",
         "model.n_layer=3",
-        "model.chunk_size=4",
+        f"model.chunk_size={trial.chunk_size}",
         "model.chunk_offset=random",
         "model.dropout=0.0",
         f"model.activation={trial.activation}",
@@ -163,6 +165,8 @@ def build_rnn_command(
         "model.exclude_initial_memory_reconstruction="
         f"{str(trial.exclude_initial_memory_reconstruction).lower()}",
         f"model.use_terminal_loss={str(trial.use_terminal_loss).lower()}",
+        "model.condition_memory_reconstruction_on_boundary="
+        f"{str(trial.condition_memory_reconstruction_on_boundary).lower()}",
         f"task.aux_weight={trial.aux_weight}",
         f"task.aux_weight_final={trial.aux_weight}",
         "task.aux_weight_schedule=fixed",

@@ -24,6 +24,8 @@ class ControlledLagStudyTest(unittest.TestCase):
 
     def test_selected_scales_are_exact(self):
         for trial in MODULE.selected_trials():
+            self.assertEqual(trial.chunk_size, 4)
+            self.assertFalse(trial.condition_memory_reconstruction_on_boundary)
             if trial.track == "tanh":
                 self.assertEqual(trial.aux_weight, 0.05)
                 self.assertEqual(trial.tau, MODULE.TANH_TAU)

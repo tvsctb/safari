@@ -34,6 +34,7 @@ class RNNAuxLMTest(unittest.TestCase):
         self.assertEqual(model.chunk_offset, "random")
         self.assertTrue(model.exclude_initial_memory_reconstruction)
         self.assertTrue(model.use_terminal_loss)
+        self.assertFalse(model.condition_memory_reconstruction_on_boundary)
         self.assertFalse(model.auxiliary_probe_only)
         self.assertIsInstance(model.terminal_target, nn.Parameter)
         self.assertEqual(tuple(model.terminal_target.shape), (1, 1, 8))
@@ -247,6 +248,29 @@ class RNNAuxLMTest(unittest.TestCase):
         torch.testing.assert_close(
             with_aux_state, without_aux_state, rtol=0, atol=0
         )
+
+    def test_boundary_conditioning_preserves_token_reconstruction(self):
+        default = self.make_model(chunk_offset=0).eval()
+        conditioned = self.make_model(
+            chunk_offset=0,
+            condition_memory_reconstruction_on_boundary=True,
+        ).eval()
+        conditioned.load_state_dict(default.state_dict())
+        chunks = torch.tensor([[2, 3, 4, 5], [6, 7, 8, 9]])
+        boundaries = torch.tensor([1, 5])
+        successor = torch.randn(1, 2, 8)
+
+        default_logits, default_targets, _ = default._inverse_batch(
+            chunks, boundaries, successor
+        )
+        conditioned_logits, conditioned_targets, conditioned_memory = (
+            conditioned._inverse_batch(chunks, boundaries, successor)
+        )
+
+        torch.testing.assert_close(conditioned_logits[:, :4], default_logits)
+        torch.testing.assert_close(conditioned_targets[:, :4], default_targets)
+        self.assertTrue(torch.all(conditioned_targets[:, -1].eq(-100)))
+        self.assertEqual(tuple(conditioned_memory.shape), (1, 2, 8))
 
     def test_offset_independence_with_training_dropout(self):
         model = RNNAuxLM(

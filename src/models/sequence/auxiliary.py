@@ -113,8 +113,17 @@ def chunk_ranges(length, chunk_size, offset=0):
     return ranges
 
 
-def boundary_inverse_targets(chunk, boundary):
-    """Build reversed data inputs and their boundary-scheme vocabulary targets."""
+def boundary_inverse_targets(
+    chunk,
+    boundary,
+    condition_memory_reconstruction_on_boundary=False,
+):
+    """Build inverse inputs and boundary-scheme vocabulary targets.
+
+    When requested, the observed boundary is appended after the reversed chunk.
+    Its target is ignored, so token CE is unchanged while the final inverse
+    state used for memory reconstruction can condition on the boundary.
+    """
     if chunk.ndim != 2 or boundary.ndim != 1:
         raise ValueError("chunk and boundary must have shapes (batch, length) and (batch,)")
     if chunk.size(0) != boundary.size(0) or chunk.size(1) == 0:
@@ -125,6 +134,9 @@ def boundary_inverse_targets(chunk, boundary):
         data_targets = boundary[:, None]
     else:
         data_targets = torch.cat((chunk[:, :-1].flip(1), boundary[:, None]), dim=1)
+    if condition_memory_reconstruction_on_boundary:
+        data_inputs = torch.cat((data_inputs, boundary[:, None]), dim=1)
+        data_targets = F.pad(data_targets, (0, 1), value=-100)
     return data_inputs, data_targets
 
 

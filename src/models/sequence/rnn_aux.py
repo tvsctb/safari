@@ -138,6 +138,7 @@ class RNNAuxLM(nn.Module):
         use_memory_loss=True,
         exclude_initial_memory_reconstruction=True,
         use_terminal_loss=True,
+        condition_memory_reconstruction_on_boundary=False,
         **kwargs,
     ):
         super().__init__()
@@ -158,6 +159,10 @@ class RNNAuxLM(nn.Module):
         if not isinstance(exclude_initial_memory_reconstruction, bool):
             raise ValueError(
                 "exclude_initial_memory_reconstruction must be a boolean"
+            )
+        if not isinstance(condition_memory_reconstruction_on_boundary, bool):
+            raise ValueError(
+                "condition_memory_reconstruction_on_boundary must be a boolean"
             )
         if chunk_offset != "random":
             if isinstance(chunk_offset, bool) or not isinstance(chunk_offset, int):
@@ -188,6 +193,9 @@ class RNNAuxLM(nn.Module):
             exclude_initial_memory_reconstruction
         )
         self.use_terminal_loss = use_terminal_loss
+        self.condition_memory_reconstruction_on_boundary = (
+            condition_memory_reconstruction_on_boundary
+        )
 
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.initial_state = nn.Parameter(torch.empty(n_layer, 1, d_model))
@@ -268,7 +276,11 @@ class RNNAuxLM(nn.Module):
         )
 
     def _inverse_batch(self, chunks, boundaries, successor_states):
-        data_ids, inverse_targets = boundary_inverse_targets(chunks, boundaries)
+        data_ids, inverse_targets = boundary_inverse_targets(
+            chunks,
+            boundaries,
+            self.condition_memory_reconstruction_on_boundary,
+        )
         if self.auxiliary_probe_only:
             observed_states = successor_states.detach()
         else:
@@ -365,11 +377,13 @@ class RNNAuxLM(nn.Module):
             inverse_logits, inverse_targets, reconstructed_states = (
                 self._inverse_batch(chunks, boundaries, successor_states)
             )
+            token_logits = inverse_logits[:, :inverse_length]
+            token_targets = inverse_targets[:, :inverse_length]
             if inverse_length > 1:
-                chunk_logits.append(inverse_logits[:, :-1])
-                chunk_targets.append(inverse_targets[:, :-1])
-            discrete_logits.append(inverse_logits[:, -1:])
-            discrete_targets.append(inverse_targets[:, -1:])
+                chunk_logits.append(token_logits[:, :-1])
+                chunk_targets.append(token_targets[:, :-1])
+            discrete_logits.append(token_logits[:, -1:])
+            discrete_targets.append(token_targets[:, -1:])
             # By default M_1 -> M_0 remains a token-reconstruction transition,
             # but the learned initial state is excluded from the Gaussian
             # memory term.  The option can restore the legacy M_0 term for a

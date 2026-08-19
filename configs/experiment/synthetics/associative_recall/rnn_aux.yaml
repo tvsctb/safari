@@ -28,6 +28,7 @@ model:
   use_memory_loss: true
   exclude_initial_memory_reconstruction: true
   use_terminal_loss: true
+  condition_memory_reconstruction_on_boundary: false
 
 task:
   _name_: aux_lm
