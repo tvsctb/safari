@@ -1,0 +1,40 @@
+name: ar-irnn-aux-pressure-factorial-20260820-v1
+description: Fully automated K5 iRNN 2x2 AUX-weight by memory-pressure factorial
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-2
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach 7c6ceb2
+      test "$(git rev-parse HEAD)" = "7c6ceb2fdeb5a77b86066afea946eda99356f7ae"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_rnn_aux \
+        tests.test_ar_rmt_scale_study \
+        tests.test_ar_rnn_study \
+        tests.test_assoc_recall_active_associations \
+        tests.test_controlled_assoc_recall \
+        tests.test_ar_rnn_controlled_lag_study \
+        tests.test_ar_irnn_aux_pressure_factorial_study
+      PYTHONPATH=.:scripts python scripts/run_ar_irnn_aux_pressure_factorial_study.py \
+        --output-root /output/ar-irnn-aux-pressure-factorial-20260820-v1 \
+        --gpu-ids 0,1 \
+        --workers-per-gpu 8 \
+        --wandb-project aux-assc-recall \
+        --wandb-entity bjjin07-x \
+        --tuning-training-group ar-irnn-aux-pressure-factorial-tuning-train-20260820-v1 \
+        --tuning-eval-group ar-irnn-aux-pressure-factorial-tuning-eval-20260820-v1 \
+        --heldout-training-group ar-irnn-aux-pressure-factorial-heldout-train-20260820-v1 \
+        --heldout-eval-group ar-irnn-aux-pressure-factorial-heldout-eval-20260820-v1 \
+        --examples-per-lag 10000 \
+        --base-batch-size 128 \
+        --dataset-seed 20260820
+    workdir: /workspace
