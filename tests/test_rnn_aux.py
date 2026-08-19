@@ -28,7 +28,6 @@ class RNNAuxLMTest(unittest.TestCase):
         self.assertIs(type(model.rnn), StackedRNN)
         self.assertIs(type(model.rnn.layers[0]), nn.RNN)
         self.assertIs(type(model.inverse_rnn), StackedRNN)
-        self.assertFalse(hasattr(model, "gru"))
         self.assertEqual(model.rnn.activation, "tanh")
         self.assertEqual(model.rnn.recurrent_init, "orthogonal")
         self.assertFalse(model.stop_gradient_memory_target)

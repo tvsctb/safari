@@ -128,13 +128,6 @@ def boundary_inverse_targets(chunk, boundary):
     return data_inputs, data_targets
 
 
-def boundary_inverse_batch(chunk, boundary, memory_embedding):
-    """Append the GRU memory token to the default boundary reverse inputs."""
-    data_inputs, data_targets = boundary_inverse_targets(chunk, boundary)
-    memory_inputs = memory_embedding.expand(chunk.size(0), 1, -1)
-    return data_inputs, memory_inputs, data_targets
-
-
 def role_inverse_targets(chunk, token_scheme):
     """Return role-scheme data order and the B vocabulary targets."""
     token_scheme = normalize_token_scheme(token_scheme)
