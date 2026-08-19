@@ -73,6 +73,18 @@ class ArRNNStudyTest(unittest.TestCase):
         self.assertIn("model.use_terminal_loss=true", command)
         self.assertIn("task.aux_weight=0.1", command)
         self.assertIn("task.aux_gradient_norm_interval=1570", command)
+        self.assertIn("dataset.num_active_associations=null", command)
+
+    def test_command_sets_exact_active_association_count(self):
+        trial = study.RNNTrial(
+            "active-k5", 202, 400, 0.1, 16.0, "test",
+            num_active_associations=5,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            command = study.build_rnn_command(
+                trial, Path(directory), "project", "entity", "group"
+            )
+        self.assertIn("dataset.num_active_associations=5", command)
 
     def test_noaux_command_trains_online_detached_inverse_probe(self):
         trial = study.make_baseline_trials()[0]

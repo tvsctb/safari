@@ -134,6 +134,7 @@ def generate_assoc_recall(
     rng: np.random.Generator,
     allow_dot: bool = True,
     valid_chars: list = None,
+    num_active_associations: int = None,
 ):
     """Generate sequence where the input has a sequence of key value pairs
     and the copy prefix at the end, and then a key value pair is inserted
@@ -148,17 +149,42 @@ def generate_assoc_recall(
         tuple(k): rng.choice(values) for k in keys_multi
     }
 
+    all_keys = list(kv_map)
+    if num_active_associations is not None:
+        pair_count = input_seq_len // (num_keys + 1)
+        if not 1 <= num_active_associations <= min(len(all_keys), pair_count):
+            raise ValueError(
+                "num_active_associations must be between 1 and both the "
+                "available-key and pair counts"
+            )
+        active_indices = rng.choice(
+            len(all_keys), size=num_active_associations, replace=False
+        )
+        active_keys = [all_keys[int(index)] for index in active_indices]
+        body_keys = list(active_keys)
+        body_keys.extend(
+            active_keys[int(index)]
+            for index in rng.integers(
+                len(active_keys), size=pair_count - len(active_keys)
+            )
+        )
+        rng.shuffle(body_keys)
+    else:
+        body_keys = [
+            all_keys[int(rng.integers(len(all_keys)))]
+            for _ in range(input_seq_len // (num_keys + 1))
+        ]
+
     key_present = {}
     vocab_seq = []
-    for _ in range(input_seq_len // (num_keys + 1)):
-        k = tuple(rng.choice(list(kv_map.keys())))
+    for k in body_keys:
         v = kv_map[k]
         vocab_seq += list(k) + [v]
         key_present[k] = True
         # vocab_seq.append(v)
 
     
-    k = tuple(rng.choice(list(kv_map.keys())))
+    k = all_keys[int(rng.integers(len(all_keys)))]
     if not allow_dot:
         while k not in key_present:
             k = tuple(rng.choice(list(key_present.keys())))
@@ -196,6 +222,7 @@ class ICLDataModule(SequenceDataset):
         max_copy_len: int = 10,
         test_seq_len: int = None,
         num_keys: int = 1, # number of keys for associative recall,
+        num_active_associations: int = None,
         return_aux_tokens: bool = False,
         data_dir: str = None,
         *args, **kwargs
@@ -223,6 +250,7 @@ class ICLDataModule(SequenceDataset):
         else:
             self.test_seq_len = input_seq_len
         self.num_keys = num_keys
+        self.num_active_associations = num_active_associations
 
         special_vocabs = {
             "copy_prefix": "=>",
@@ -256,7 +284,27 @@ class ICLDataModule(SequenceDataset):
         return generate_induction_head(self.vocab, seqlen if seqlen is not None else self.input_seq_len, self.special_vocabs["copy_prefix"], self.induction_len, self.induction_num_triggers, self.rng, valid_chars=valid_chars)
 
     def generate_assoc_recall(self, seqlen=None, valid_chars=None):
-        return generate_assoc_recall(self.vocab, seqlen if seqlen is not None else self.input_seq_len, self.num_keys, self.rng, allow_dot = self.allow_dot, valid_chars=valid_chars)
+        return generate_assoc_recall(
+            self.vocab,
+            seqlen if seqlen is not None else self.input_seq_len,
+            self.num_keys,
+            self.rng,
+            allow_dot=self.allow_dot,
+            valid_chars=valid_chars,
+            num_active_associations=self.num_active_associations,
+        )
+
+    def _cache_path(self, split: str) -> str:
+        active = (
+            "all"
+            if self.num_active_associations is None
+            else str(self.num_active_associations)
+        )
+        return os.path.join(
+            self.data_dir,
+            f"{split}_{self.copy_method}_{self.num_examples}_{self.vocab_size}_"
+            f"{self.input_seq_len}_active{active}.pt",
+        )
 
     def generate_example(self, seqlen=None, valid_chars=None):
         vocab_seq = self.copy_f(seqlen=seqlen, valid_chars=valid_chars)
@@ -266,10 +314,8 @@ class ICLDataModule(SequenceDataset):
         train_tensor = test_tensor = None
         if self.data_dir is not None:
             try: 
-                train_tensor = torch.load(os.path.join(self.data_dir, 
-                    f"train_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt"))
-                test_tensor = torch.load(os.path.join(self.data_dir, 
-                    f"test_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt"))
+                train_tensor = torch.load(self._cache_path("train"))
+                test_tensor = torch.load(self._cache_path("test"))
             except:
                 pass
                 
@@ -317,12 +363,8 @@ class ICLDataModule(SequenceDataset):
                 train_tensor[:, 1, :-1 * (self.num_extra_seq_len - 1)] = -100
 
             if self.data_dir is not None:
-                torch.save(train_tensor, os.path.join(self.data_dir,
-                    f"train_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt")
-                )
-                torch.save(test_tensor, os.path.join(self.data_dir,
-                    f"test_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt")
-                )
+                torch.save(train_tensor, self._cache_path("train"))
+                torch.save(test_tensor, self._cache_path("test"))
              
         def make_dataset(tensor):
             inputs = tensor[:, 0, :]

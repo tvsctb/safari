@@ -90,6 +90,10 @@ def evaluation_command(
         "--wandb-entity", args.wandb_entity,
         "--wandb-group", args.eval_group,
     ]
+    if trial.num_active_associations is not None:
+        command.extend(
+            ["--num-active-associations", str(trial.num_active_associations)]
+        )
     if trial.probe_only:
         command.append("--probe-only")
     if trial.condition_memory_reconstruction_on_boundary:

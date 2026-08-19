@@ -48,6 +48,7 @@ def generate_controlled_lag_batch(
     seed: int,
     num_pairs: int = 20,
     vocab_size: int = 20,
+    num_active_associations: int | None = None,
 ) -> ControlledLagBatch:
     """Generate paired examples whose body stays fixed at ``2 * num_pairs``.
 
@@ -68,6 +69,13 @@ def generate_controlled_lag_batch(
     keys, values = non_special[:split], non_special[split:]
     if len(keys) < 2:
         raise ValueError("controlled lag requires at least two keys")
+    if num_active_associations is not None and not (
+        2 <= num_active_associations <= min(len(keys), num_pairs)
+    ):
+        raise ValueError(
+            "num_active_associations must be between 2 and both the key and "
+            "pair counts"
+        )
 
     key_ids = np.asarray([vocab.get_id(token) for token in keys], dtype=np.int64)
     value_ids = np.asarray(
@@ -79,15 +87,32 @@ def generate_controlled_lag_batch(
     # Match the original generator: each example samples a key->value mapping,
     # with replacement on the value side.
     mappings = rng.choice(value_ids, size=(num_base_examples, len(keys)))
-    query_indices = rng.integers(len(keys), size=num_base_examples)
+    query_indices = np.empty(num_base_examples, dtype=np.int64)
     distractor_indices = np.empty(
         (num_base_examples, num_pairs - 1), dtype=np.int64
     )
-    for row, query_index in enumerate(query_indices):
-        choices = np.delete(np.arange(len(keys)), query_index)
-        distractor_indices[row] = rng.choice(
-            choices, size=num_pairs - 1, replace=True
-        )
+    for row in range(num_base_examples):
+        if num_active_associations is None:
+            query_index = int(rng.integers(len(keys)))
+            choices = np.delete(np.arange(len(keys)), query_index)
+            distractors = rng.choice(choices, size=num_pairs - 1, replace=True)
+        else:
+            active = rng.choice(
+                len(keys), size=num_active_associations, replace=False
+            )
+            query_index = int(active[int(rng.integers(len(active)))])
+            choices = active[active != query_index]
+            distractors = list(choices)
+            distractors.extend(
+                choices[
+                    rng.integers(
+                        len(choices), size=(num_pairs - 1) - len(choices)
+                    )
+                ]
+            )
+            rng.shuffle(distractors)
+        query_indices[row] = query_index
+        distractor_indices[row] = distractors
 
     sequence_length = 2 * num_pairs + 2
     inputs = np.empty(

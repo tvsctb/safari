@@ -55,6 +55,7 @@ class RNNTrial:
     chunk_size: int = 4
     condition_memory_reconstruction_on_boundary: bool = False
     track: str = "legacy"
+    num_active_associations: int | None = None
 
 
 def make_baseline_trials() -> List[RNNTrial]:
@@ -138,6 +139,8 @@ def build_rnn_command(
         f"train.model_seed={trial.seed}",
         f"train.runtime_seed={trial.seed}",
         f"+dataset.seed={trial.seed}",
+        "dataset.num_active_associations="
+        f"{trial.num_active_associations if trial.num_active_associations is not None else 'null'}",
         f"dataset.loader_seed={trial.seed}",
         "loader.num_workers=0",
         "scheduler=linear_warmup",

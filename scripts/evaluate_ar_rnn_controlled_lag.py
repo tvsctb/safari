@@ -94,6 +94,7 @@ def evaluate(model: RNNAuxLM, args: argparse.Namespace) -> dict:
             seed=args.dataset_seed + start,
             num_pairs=num_pairs,
             vocab_size=20,
+            num_active_associations=args.num_active_associations,
         )
         flat_inputs = batch.input_ids.flatten(0, 1).to(device)
         flat_targets = batch.targets.flatten().to(device)
@@ -133,6 +134,7 @@ def evaluate(model: RNNAuxLM, args: argparse.Namespace) -> dict:
             "same_distractor_multiset_across_lags": True,
             "examples_per_lag": args.examples_per_lag,
             "dataset_seed": args.dataset_seed,
+            "num_active_associations": args.num_active_associations,
         },
         "overall": {
             "count": total_count,
@@ -217,6 +219,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--examples-per-lag", type=int, default=10000)
     parser.add_argument("--base-batch-size", type=int, default=128)
     parser.add_argument("--dataset-seed", type=int, default=20260819)
+    parser.add_argument("--num-active-associations", type=int)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--wandb-mode", choices=("online", "disabled"), default="online")
     parser.add_argument("--wandb-project", default="aux-assc-recall")

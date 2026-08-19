@@ -4,5 +4,6 @@ num_test_examples: 500
 vocab_size: 20
 input_seq_len: 40
 copy_method: "assoc_recall"
+num_active_associations: null
 __train_len: ${.num_examples}
 __l_max: ${eval:${.input_seq_len} + 2}

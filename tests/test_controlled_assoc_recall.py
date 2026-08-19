@@ -47,9 +47,25 @@ class ControlledAssociativeRecallTest(unittest.TestCase):
         self.assertTrue(torch.equal(first.input_ids, second.input_ids))
         self.assertTrue(torch.equal(first.targets, second.targets))
 
+    def test_exact_active_association_count(self):
+        batch = generate_controlled_lag_batch(
+            8, seed=123, num_active_associations=5
+        )
+        for example in range(8):
+            query_key = int(batch.input_ids[example, 0, -1])
+            for position in range(20):
+                body = batch.input_ids[example, position, :40].reshape(20, 2)
+                keys = [int(pair[0]) for pair in body]
+                self.assertEqual(len(set(keys)), 5)
+                self.assertEqual(keys.count(query_key), 1)
+
     def test_rejects_invalid_counts(self):
         with self.assertRaises(ValueError):
             generate_controlled_lag_batch(0, seed=1)
+        with self.assertRaises(ValueError):
+            generate_controlled_lag_batch(
+                1, seed=1, num_active_associations=1
+            )
 
 
 if __name__ == "__main__":
