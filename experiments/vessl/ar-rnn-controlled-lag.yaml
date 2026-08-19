@@ -1,0 +1,35 @@
+name: ar-rnn-controlled-lag-20260819-v1
+description: Reproduce selected tanh/iRNN endpoints and evaluate fixed-length controlled recall lag
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-2
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach da35a44
+      test "$(git rev-parse HEAD)" = "da35a44d474210fb60e5a1ba7034d27072e5a8e3"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_rnn_aux \
+        tests.test_ar_rnn_study \
+        tests.test_controlled_assoc_recall \
+        tests.test_ar_rnn_controlled_lag_study
+      PYTHONPATH=.:scripts python scripts/run_ar_rnn_controlled_lag_study.py \
+        --output-root /output/ar-rnn-controlled-lag-20260819-v1 \
+        --gpu-ids 0,1 \
+        --workers-per-gpu 8 \
+        --wandb-project aux-assc-recall \
+        --wandb-entity bjjin07-x \
+        --training-group ar-rnn-controlled-lag-retrain-20260819-v1 \
+        --eval-group ar-rnn-controlled-lag-eval-20260819-v1 \
+        --examples-per-lag 10000 \
+        --base-batch-size 128 \
+        --dataset-seed 20260819
+    workdir: /workspace
