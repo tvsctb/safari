@@ -341,8 +341,10 @@ class StudyController:
         self.manifest_path = output_root / "manifest.json"
         self.lock = threading.Lock()
         self.slots = queue.Queue()
-        for gpu_id in gpu_ids:
-            for _ in range(workers_per_gpu):
+        # Interleave devices so a trial set smaller than the total slot count
+        # cannot consume only the leading GPU's slots.
+        for _ in range(workers_per_gpu):
+            for gpu_id in gpu_ids:
                 self.slots.put(gpu_id)
         if self.slots.qsize() == 0:
             raise ValueError("at least one GPU worker slot is required")
