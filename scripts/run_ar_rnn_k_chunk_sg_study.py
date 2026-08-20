@@ -8,6 +8,7 @@ import json
 import os
 import statistics
 import subprocess
+import sys
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -266,6 +267,15 @@ def run_preflight(root: Path, gpu_id: int):
     )
     status = controller.run_trials(trials)
     if not all(status.get(trial.trial_id, False) for trial in trials):
+        for trial in trials:
+            log = root / "trials" / trial.trial_id / "train.log"
+            if log.exists():
+                print(
+                    f"RNN K/chunk/SG preflight log ({log}):\n"
+                    + log.read_text(encoding="utf-8", errors="replace")[-20000:],
+                    file=sys.stderr,
+                    flush=True,
+                )
         raise RuntimeError("multi-chunk/SG GPU preflight failed")
     marker.write_text("ok\n")
 
@@ -282,6 +292,7 @@ def parse_args():
     parser.add_argument("--base-batch-size", type=int, default=128)
     parser.add_argument("--dataset-seed", type=int, default=20260821)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true")
     return parser.parse_args()
 
 
@@ -295,6 +306,8 @@ def main():
     atomic_json(args.output_root / "plan.json", {"groups": groups, "k_grid": K_GRID, "chunk_variants": CHUNK_VARIANTS})
     if not args.dry_run:
         run_preflight(args.output_root / "preflight", gpu_ids[0])
+        if args.preflight_only:
+            return 0
     difficulty = difficulty_trials()
     difficulty_root = args.output_root / "difficulty"
     run_phase(difficulty, difficulty_root, args, groups["difficulty-train"], groups["difficulty-eval"], gpu_ids)
