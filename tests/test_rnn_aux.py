@@ -4,6 +4,7 @@ from unittest import mock
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import ListConfig
 
 from src.models.sequence.rnn_aux import RNNAuxLM, StackedRNN
 
@@ -210,6 +211,10 @@ class RNNAuxLMTest(unittest.TestCase):
         torch.testing.assert_close(first.logits, second.logits, rtol=0, atol=0)
         torch.testing.assert_close(first_state, second_state, rtol=0, atol=0)
         torch.testing.assert_close(first.aux_loss, second.aux_loss, rtol=0, atol=0)
+
+    def test_hydra_listconfig_chunk_sizes_are_accepted(self):
+        model = self.make_model(aux_chunk_sizes=ListConfig([1, 4]))
+        self.assertEqual(model.aux_chunk_sizes, (1, 4))
 
     def test_multiscale_loss_is_sum_of_complete_individual_scale_losses(self):
         multi = self.make_model(aux_chunk_sizes=[2, 4], chunk_offset=0).eval()

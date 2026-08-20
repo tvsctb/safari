@@ -1,5 +1,6 @@
 import copy
 from collections import defaultdict
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
@@ -161,8 +162,13 @@ class RNNAuxLM(nn.Module):
             raise ValueError("chunk_size must be a positive integer")
         if aux_chunk_sizes is None:
             aux_chunk_sizes = (chunk_size,)
-        if not isinstance(aux_chunk_sizes, (list, tuple)) or not aux_chunk_sizes:
+        if (
+            isinstance(aux_chunk_sizes, (str, bytes))
+            or not isinstance(aux_chunk_sizes, Sequence)
+            or not aux_chunk_sizes
+        ):
             raise ValueError("aux_chunk_sizes must be null or a non-empty list")
+        aux_chunk_sizes = tuple(aux_chunk_sizes)
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value < 1
             for value in aux_chunk_sizes
