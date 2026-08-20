@@ -161,6 +161,41 @@ def run_phase(trials, root, args, train_group, eval_group, gpu_ids):
         run_evaluations(trials, root, gpu_ids, eval_args(args, eval_group))
 
 
+def run_preflight(root: Path, gpu_id: int):
+    marker = root / "PREFLIGHT_OK"
+    if marker.exists():
+        return
+    kappas = {
+        "irnn": {"memory": 3.0, "terminal": 5.0},
+        "tanh": {"memory": 0.04, "terminal": 0.01},
+    }
+    trials = [
+        make_trial("irnn", "vv-learned", 20260821, kappas, "preflight", 1),
+        make_trial("tanh", "gg", 20260822, kappas, "preflight", 1),
+    ]
+
+    def command_builder(trial, output_root, project, entity, group):
+        command = build_rnn_command(trial, output_root, project, entity, group)
+        replacements = {
+            "+trainer.check_val_every_n_epoch=5": "+trainer.check_val_every_n_epoch=1",
+            "trainer.limit_train_batches=1.0": "trainer.limit_train_batches=2",
+            "trainer.limit_val_batches=1.0": "trainer.limit_val_batches=2",
+            "wandb.mode=online": "wandb.mode=disabled",
+            "+wandb.entity=unused": "+wandb.entity=null",
+            "+wandb.resume=allow": "+wandb.resume=null",
+        }
+        return [replacements.get(argument, argument) for argument in command]
+
+    controller = StudyController(
+        root, (gpu_id,), 1, "unused", "unused", "unused",
+        command_builder=command_builder, dry_run=False,
+    )
+    status = controller.run_trials(trials)
+    if not all(status.get(trial.trial_id, False) for trial in trials):
+        raise RuntimeError("GG/VV GPU preflight failed")
+    marker.write_text("ok\n")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", type=Path, required=True)
@@ -179,6 +214,8 @@ def parse_args():
 def main():
     args = parse_args()
     gpu_ids = tuple(int(value) for value in args.gpu_ids.split(",") if value)
+    if not args.dry_run:
+        run_preflight(args.output_root / "preflight", gpu_ids[0])
     device = torch.device(f"cuda:{gpu_ids[0]}" if torch.cuda.is_available() else "cpu")
     calibration = calibrate(device)
     kappas = {
