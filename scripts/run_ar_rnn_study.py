@@ -56,6 +56,12 @@ class RNNTrial:
     condition_memory_reconstruction_on_boundary: bool = False
     track: str = "legacy"
     num_active_associations: int | None = None
+    aux_chunk_sizes: tuple[int, ...] | None = None
+    stop_gradient_memory_target: bool = False
+    state_aux_distribution: str = "gaussian"
+    vmf_kappa_mode: str = "fixed"
+    memory_vmf_kappa: float = 1.0
+    terminal_vmf_kappa: float = 1.0
 
 
 def make_baseline_trials() -> List[RNNTrial]:
@@ -118,6 +124,11 @@ def build_rnn_command(
     checkpoint_dir = trial_root / "checkpoints"
     checkpoint = checkpoint_dir / "last.ckpt"
     has_aux = trial.aux_weight != 0.0
+    chunk_sizes = (
+        "null"
+        if trial.aux_chunk_sizes is None
+        else "[" + ",".join(str(value) for value in trial.aux_chunk_sizes) + "]"
+    )
     command = [
         sys.executable,
         "-m",
@@ -151,6 +162,7 @@ def build_rnn_command(
         "model.d_model=64",
         "model.n_layer=3",
         f"model.chunk_size={trial.chunk_size}",
+        f"model.aux_chunk_sizes={chunk_sizes}",
         "model.chunk_offset=random",
         "model.dropout=0.0",
         f"model.activation={trial.activation}",
@@ -158,8 +170,13 @@ def build_rnn_command(
         f"model.recurrent_identity_scale={trial.recurrent_identity_scale}",
         f"model.rho={trial.rho}",
         f"model.tau={trial.tau}",
+        f"model.state_aux_distribution={trial.state_aux_distribution}",
+        f"model.vmf_kappa_mode={trial.vmf_kappa_mode}",
+        f"model.memory_vmf_kappa={trial.memory_vmf_kappa}",
+        f"model.terminal_vmf_kappa={trial.terminal_vmf_kappa}",
         f"model.auxiliary_probe_only={str(trial.probe_only).lower()}",
-        "model.stop_gradient_memory_target=false",
+        "model.stop_gradient_memory_target="
+        f"{str(trial.stop_gradient_memory_target).lower()}",
         "model.stop_gradient_memory_observation=false",
         "model.memory_observation_gradient_scale=1.0",
         "model.use_chunk_loss=true",

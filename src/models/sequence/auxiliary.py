@@ -1,6 +1,7 @@
 import math
 from typing import NamedTuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -349,6 +350,160 @@ def terminal_gaussian_nll(
         residual.float().pow(2) / (2.0 * state_scale.pow(2))
         + torch.log(state_scale)
     ).sum() / batch_size
+
+
+def vmf_log_normalizer_grid(dimension, minimum=1e-4, maximum=1e4, points=4096):
+    """Precompute log C_d(kappa) on a log grid for stable vMF NLLs.
+
+    SciPy's exponentially scaled Bessel function makes the table stable in the
+    high-dimensional/high-concentration regime used by recurrent states.  The
+    returned tensors are intended to be registered as non-persistent buffers;
+    interpolation remains differentiable with respect to kappa.
+    """
+    if dimension < 2:
+        raise ValueError("vMF dimension must be at least 2")
+    if not 0 < minimum < maximum or points < 2:
+        raise ValueError("invalid vMF normalizer grid")
+    from scipy import special
+
+    log_kappa = np.linspace(math.log(minimum), math.log(maximum), points)
+    kappa = np.exp(log_kappa)
+    order = dimension / 2.0 - 1.0
+    scaled_bessel = special.ive(order, kappa)
+    valid = np.isfinite(scaled_bessel) & (scaled_bessel > 0)
+    log_normalizer = np.empty_like(kappa)
+    log_bessel = np.log(scaled_bessel[valid]) + kappa[valid]
+    log_normalizer[valid] = (
+        order * log_kappa[valid]
+        - (dimension / 2.0) * math.log(2.0 * math.pi)
+        - log_bessel
+    )
+    # For concentrations where a high-order Bessel value underflows, the
+    # fourth-order uniform-sphere cumulant expansion is effectively exact at
+    # the grid precision and joins the Bessel branch smoothly.
+    small = ~valid
+    uniform_log_normalizer = (
+        math.lgamma(dimension / 2.0)
+        - math.log(2.0)
+        - (dimension / 2.0) * math.log(math.pi)
+    )
+    log_normalizer[small] = (
+        uniform_log_normalizer
+        - kappa[small] ** 2 / (2.0 * dimension)
+        + kappa[small] ** 4 / (4.0 * dimension ** 2 * (dimension + 2.0))
+    )
+    if not np.all(np.isfinite(log_normalizer)):
+        raise RuntimeError("failed to construct a finite vMF normalizer grid")
+    return (
+        torch.from_numpy(log_kappa.astype(np.float64)),
+        torch.from_numpy(log_normalizer.astype(np.float64)),
+    )
+
+
+def interpolate_vmf_log_normalizer(kappa, log_kappa_grid, log_normalizer_grid):
+    """Linearly interpolate log C_d(kappa) in log-kappa coordinates."""
+    if log_kappa_grid.ndim != 1 or log_normalizer_grid.shape != log_kappa_grid.shape:
+        raise ValueError("vMF normalizer grids must be equal-length vectors")
+    log_kappa = kappa.double().log().clamp(
+        min=log_kappa_grid[0], max=log_kappa_grid[-1]
+    )
+    upper = torch.searchsorted(log_kappa_grid, log_kappa).clamp(
+        min=1, max=log_kappa_grid.numel() - 1
+    )
+    lower = upper - 1
+    x0 = log_kappa_grid[lower]
+    x1 = log_kappa_grid[upper]
+    y0 = log_normalizer_grid[lower]
+    y1 = log_normalizer_grid[upper]
+    weight = (log_kappa - x0) / (x1 - x0)
+    return (y0 + weight * (y1 - y0)).to(dtype=kappa.dtype)
+
+
+def _whole_state_directions(target, estimate):
+    """Flatten all recurrent layers into one directional state per example."""
+    if target.shape != estimate.shape or target.ndim < 2:
+        raise ValueError("vMF target and estimate must have matching state shapes")
+    target = target.reshape(target.size(0), -1).float()
+    estimate = estimate.reshape(estimate.size(0), -1).float()
+    epsilon = torch.finfo(target.dtype).eps
+    target_norm = target.norm(dim=-1)
+    estimate_norm = estimate.norm(dim=-1)
+    target_direction = target / target_norm.clamp_min(epsilon).unsqueeze(-1)
+    estimate_direction = estimate / estimate_norm.clamp_min(epsilon).unsqueeze(-1)
+    cosine = (target_direction * estimate_direction).sum(dim=-1)
+    return cosine, target_norm, estimate_norm
+
+
+def vmf_nll_sum(
+    targets,
+    estimates,
+    kappa,
+    log_kappa_grid,
+    log_normalizer_grid,
+    reference,
+    batch_size,
+):
+    """Sum proper whole-state vMF NLLs and average the original minibatch."""
+    if not targets:
+        return reference.new_zeros(())
+    if len(targets) != len(estimates):
+        raise ValueError("targets and estimates must have the same length")
+    target_values = torch.cat(tuple(targets), dim=0)
+    estimate_values = torch.cat(tuple(estimates), dim=0)
+    cosine, _, _ = _whole_state_directions(target_values, estimate_values)
+    log_normalizer = interpolate_vmf_log_normalizer(
+        kappa, log_kappa_grid, log_normalizer_grid
+    )
+    return (-kappa.float() * cosine - log_normalizer.float()).sum() / batch_size
+
+
+def terminal_vmf_nll(
+    value,
+    target,
+    kappa,
+    log_kappa_grid,
+    log_normalizer_grid,
+    batch_size,
+):
+    """Evaluate a proper vMF terminal-state loss per sequence."""
+    target = target.expand(-1, value.size(1), -1)
+    value = value.transpose(0, 1)
+    target = target.transpose(0, 1)
+    cosine, _, _ = _whole_state_directions(target, value)
+    log_normalizer = interpolate_vmf_log_normalizer(
+        kappa, log_kappa_grid, log_normalizer_grid
+    )
+    return (-kappa.float() * cosine - log_normalizer.float()).sum() / batch_size
+
+
+def directional_reconstruction_diagnostics(targets, estimates, reference):
+    """Detached whole-state angular and radial diagnostics."""
+    if not targets:
+        zero = reference.detach().new_zeros(())
+        return {
+            "cosine": zero,
+            "angular_error": zero,
+            "target_norm": zero,
+            "estimate_norm": zero,
+            "radial_relative_error": zero,
+            "low_norm_fraction": zero,
+        }
+    target = torch.cat(tuple(targets), dim=0).detach()
+    estimate = torch.cat(tuple(estimates), dim=0).detach()
+    cosine, target_norm, estimate_norm = _whole_state_directions(target, estimate)
+    epsilon = torch.finfo(cosine.dtype).eps
+    low_norm = (target_norm <= epsilon) | (estimate_norm <= epsilon)
+    return {
+        "cosine": cosine.mean(),
+        "angular_error": torch.acos(cosine.clamp(-1.0, 1.0)).mean(),
+        "target_norm": target_norm.mean(),
+        "estimate_norm": estimate_norm.mean(),
+        "radial_relative_error": (
+            (estimate_norm - target_norm).abs()
+            / target_norm.clamp_min(epsilon)
+        ).mean(),
+        "low_norm_fraction": low_norm.float().mean(),
+    }
 
 
 def bounded_exp(log_scale, minimum=1e-4, maximum=1e4):

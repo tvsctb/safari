@@ -10,13 +10,17 @@ from src.models.sequence.auxiliary import (
     boundary_inverse_targets,
     chunk_ranges,
     cross_entropy_sum,
+    directional_reconstruction_diagnostics,
     gaussian_nll_sum,
     memory_observation,
     memory_reconstruction_diagnostics,
     memory_reconstruction_target,
     terminal_gaussian_nll,
     terminal_reconstruction_mse,
+    terminal_vmf_nll,
     validate_memory_observation_gradient_scale,
+    vmf_log_normalizer_grid,
+    vmf_nll_sum,
 )
 
 
@@ -122,6 +126,7 @@ class RNNAuxLM(nn.Module):
         n_layer,
         vocab_size,
         chunk_size=4,
+        aux_chunk_sizes=None,
         chunk_offset="random",
         dropout=0.0,
         activation="tanh",
@@ -129,6 +134,10 @@ class RNNAuxLM(nn.Module):
         recurrent_identity_scale=1.0,
         rho=1.0,
         tau=1.0,
+        state_aux_distribution="gaussian",
+        vmf_kappa_mode="fixed",
+        memory_vmf_kappa=1.0,
+        terminal_vmf_kappa=1.0,
         auxiliary_probe_only=False,
         stop_gradient_memory_target=False,
         stop_gradient_memory_observation=False,
@@ -148,12 +157,29 @@ class RNNAuxLM(nn.Module):
             )
         if d_model <= 0 or n_layer <= 0:
             raise ValueError("d_model and n_layer must be positive")
-        if chunk_size <= 1:
-            raise ValueError("chunk_size must be greater than 1")
+        if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:
+            raise ValueError("chunk_size must be a positive integer")
+        if aux_chunk_sizes is None:
+            aux_chunk_sizes = (chunk_size,)
+        if not isinstance(aux_chunk_sizes, (list, tuple)) or not aux_chunk_sizes:
+            raise ValueError("aux_chunk_sizes must be null or a non-empty list")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in aux_chunk_sizes
+        ):
+            raise ValueError("aux_chunk_sizes must contain positive integers")
+        if len(set(aux_chunk_sizes)) != len(aux_chunk_sizes):
+            raise ValueError("aux_chunk_sizes must not contain duplicates")
         if not 0.0 <= float(dropout) < 1.0:
             raise ValueError("dropout must be in [0, 1)")
         if rho <= 0 or tau <= 0:
             raise ValueError("rho and tau must be positive")
+        if state_aux_distribution not in {"gaussian", "vmf"}:
+            raise ValueError("state_aux_distribution must be gaussian or vmf")
+        if vmf_kappa_mode not in {"fixed", "learned"}:
+            raise ValueError("vmf_kappa_mode must be fixed or learned")
+        if memory_vmf_kappa <= 0 or terminal_vmf_kappa <= 0:
+            raise ValueError("vMF kappas must be positive")
         if not isinstance(auxiliary_probe_only, bool):
             raise ValueError("auxiliary_probe_only must be a boolean")
         if not isinstance(exclude_initial_memory_reconstruction, bool):
@@ -169,15 +195,20 @@ class RNNAuxLM(nn.Module):
                 raise ValueError(
                     "chunk_offset must be 'random' or an integer in [0, chunk_size)"
                 )
-            if not 0 <= chunk_offset < chunk_size:
-                raise ValueError("fixed chunk_offset must be in [0, chunk_size)")
+            if not all(0 <= chunk_offset < value for value in aux_chunk_sizes):
+                raise ValueError(
+                    "fixed chunk_offset must be valid for every auxiliary chunk size"
+                )
 
         self.d_model = d_model
         self.d_output = vocab_size
         self.n_layer = n_layer
         self.vocab_size = vocab_size
         self.chunk_size = chunk_size
+        self.aux_chunk_sizes = tuple(aux_chunk_sizes)
         self.chunk_offset = chunk_offset
+        self.state_aux_distribution = state_aux_distribution
+        self.vmf_kappa_mode = vmf_kappa_mode
         self.auxiliary_probe_only = auxiliary_probe_only
         self.stop_gradient_memory_target = stop_gradient_memory_target
         self.stop_gradient_memory_observation = stop_gradient_memory_observation
@@ -221,14 +252,51 @@ class RNNAuxLM(nn.Module):
         )
         self.register_buffer("rho", torch.tensor(float(rho)))
         self.register_buffer("tau", torch.tensor(float(tau)))
+        if vmf_kappa_mode == "learned":
+            self.log_memory_vmf_kappa = nn.Parameter(
+                torch.tensor(float(memory_vmf_kappa)).log()
+            )
+            self.log_terminal_vmf_kappa = nn.Parameter(
+                torch.tensor(float(terminal_vmf_kappa)).log()
+            )
+            self.log_memory_vmf_kappa._no_weight_decay = True
+            self.log_terminal_vmf_kappa._no_weight_decay = True
+        else:
+            self.register_buffer(
+                "memory_vmf_kappa",
+                torch.tensor(float(memory_vmf_kappa)),
+                persistent=False,
+            )
+            self.register_buffer(
+                "terminal_vmf_kappa",
+                torch.tensor(float(terminal_vmf_kappa)),
+                persistent=False,
+            )
+        if state_aux_distribution == "vmf":
+            log_kappa, log_normalizer = vmf_log_normalizer_grid(n_layer * d_model)
+            self.register_buffer(
+                "_vmf_log_kappa_grid", log_kappa, persistent=False
+            )
+            self.register_buffer(
+                "_vmf_log_normalizer_grid", log_normalizer, persistent=False
+            )
+            self.terminal_target._no_weight_decay = True
         self.reset_parameters()
         self.metrics = {}
         self.loss_components = {}
+        self.scale_loss_components = {}
 
     def reset_parameters(self):
         nn.init.normal_(self.embedding.weight, std=0.02)
         nn.init.normal_(self.initial_state, std=0.02)
-        nn.init.zeros_(self.terminal_target)
+        if self.state_aux_distribution == "vmf":
+            # Draw a nonzero terminal direction without perturbing the forward
+            # model's initialization stream relative to the Gaussian control.
+            rng_state = torch.random.get_rng_state()
+            nn.init.normal_(self.terminal_target, std=0.02)
+            torch.random.set_rng_state(rng_state)
+        else:
+            nn.init.zeros_(self.terminal_target)
         self.rnn.reset_parameters()
         self.inverse_rnn.load_state_dict(self.rnn.state_dict())
 
@@ -265,10 +333,18 @@ class RNNAuxLM(nn.Module):
             -1, batch_shape[0], -1
         )
 
-    def _sample_offsets(self, batch_size, device):
+    def _configured_vmf_kappa(self, name):
+        if self.vmf_kappa_mode == "learned":
+            return getattr(self, f"log_{name}_vmf_kappa").exp().clamp(
+                min=1e-4, max=1e4
+            )
+        return getattr(self, f"{name}_vmf_kappa")
+
+    def _sample_offsets(self, batch_size, device, chunk_size=None):
+        chunk_size = self.chunk_size if chunk_size is None else chunk_size
         if self.chunk_offset == "random" and self.training:
             return torch.randint(
-                self.chunk_size, (batch_size,), device=device
+                chunk_size, (batch_size,), device=device
             )
         fixed = 0 if self.chunk_offset == "random" else self.chunk_offset
         return torch.full(
@@ -312,12 +388,18 @@ class RNNAuxLM(nn.Module):
         )
 
     def _collect_inverse_records(
-        self, input_ids, token_stream, initial_state, trajectory, offsets
+        self,
+        input_ids,
+        token_stream,
+        initial_state,
+        trajectory,
+        offsets,
+        chunk_size,
     ):
         """Select AUX transitions from an already-computed forward trajectory."""
         records = defaultdict(list)
         length = input_ids.size(1)
-        for offset in range(self.chunk_size):
+        for offset in range(chunk_size):
             indices = torch.nonzero(
                 offsets == offset, as_tuple=False
             ).squeeze(1)
@@ -325,7 +407,7 @@ class RNNAuxLM(nn.Module):
                 continue
             group_inputs = input_ids.index_select(0, indices)
             group_tokens = token_stream.index_select(0, indices)
-            for start, end in chunk_ranges(length, self.chunk_size, offset):
+            for start, end in chunk_ranges(length, chunk_size, offset):
                 records[end - start].append(
                     (
                         group_tokens[:, start:end],
@@ -348,12 +430,18 @@ class RNNAuxLM(nn.Module):
         initial_state,
         trajectory,
         offsets,
+        chunk_size,
         logits,
         compute_diagnostics,
     ):
         batch_size, length = input_ids.shape
         records_by_length = self._collect_inverse_records(
-            input_ids, token_stream, initial_state, trajectory, offsets
+            input_ids,
+            token_stream,
+            initial_state,
+            trajectory,
+            offsets,
+            chunk_size,
         )
         chunk_logits = []
         chunk_targets = []
@@ -439,14 +527,25 @@ class RNNAuxLM(nn.Module):
             ) / sequence_normalizer
         loss_memory = logits.new_zeros(())
         if self.use_memory_loss:
-            loss_memory = gaussian_nll_sum(
-                memory_targets,
-                memory_estimates,
-                self.rho,
-                logits,
-                batch_size,
-                scale_axis=1,
-            ) / sequence_normalizer
+            if self.state_aux_distribution == "gaussian":
+                loss_memory = gaussian_nll_sum(
+                    memory_targets,
+                    memory_estimates,
+                    self.rho,
+                    logits,
+                    batch_size,
+                    scale_axis=1,
+                ) / sequence_normalizer
+            else:
+                loss_memory = vmf_nll_sum(
+                    memory_targets,
+                    memory_estimates,
+                    self._configured_vmf_kappa("memory"),
+                    self._vmf_log_kappa_grid,
+                    self._vmf_log_normalizer_grid,
+                    logits,
+                    batch_size,
+                ) / sequence_normalizer
         loss_terminal = logits.new_zeros(())
         if self.use_terminal_loss:
             terminal_value = torch.stack(
@@ -454,22 +553,32 @@ class RNNAuxLM(nn.Module):
             )
             if self.auxiliary_probe_only:
                 terminal_value = terminal_value.detach()
-            loss_terminal = terminal_gaussian_nll(
-                terminal_value,
-                self.tau,
-                batch_size,
-                scale_axis=0,
-                target=self.terminal_target,
-            ) / sequence_normalizer
+            if self.state_aux_distribution == "gaussian":
+                loss_terminal = terminal_gaussian_nll(
+                    terminal_value,
+                    self.tau,
+                    batch_size,
+                    scale_axis=0,
+                    target=self.terminal_target,
+                ) / sequence_normalizer
+            else:
+                loss_terminal = terminal_vmf_nll(
+                    terminal_value,
+                    self.terminal_target,
+                    self._configured_vmf_kappa("terminal"),
+                    self._vmf_log_kappa_grid,
+                    self._vmf_log_normalizer_grid,
+                    batch_size,
+                ) / sequence_normalizer
         aux_loss = loss_chunk + loss_discrete + loss_memory + loss_terminal
-        self.loss_components = {
+        components = {
             "chunk_ce": loss_chunk,
             "discrete_ce": loss_discrete,
             "memory_nll": loss_memory,
             "terminal_nll": loss_terminal,
             "total": aux_loss,
         }
-        self.metrics = {
+        metrics = {
             "aux/chunk_ce": loss_chunk.detach(),
             "aux/discrete_ce": loss_discrete.detach(),
             "aux/memory_nll": loss_memory.detach(),
@@ -482,12 +591,18 @@ class RNNAuxLM(nn.Module):
             "aux/probe_only": logits.detach().new_tensor(
                 float(self.auxiliary_probe_only)
             ),
+            "aux/memory_vmf_kappa": self._configured_vmf_kappa(
+                "memory"
+            ).detach().reshape(()),
+            "aux/terminal_vmf_kappa": self._configured_vmf_kappa(
+                "terminal"
+            ).detach().reshape(()),
         }
         if compute_diagnostics:
             diagnostics = memory_reconstruction_diagnostics(
                 memory_targets, memory_estimates, logits
             )
-            self.metrics.update(
+            metrics.update(
                 {
                     "aux/memory_reconstruction_mse": diagnostics[
                         "residual_mse"
@@ -498,10 +613,28 @@ class RNNAuxLM(nn.Module):
                     },
                 }
             )
+            directional = directional_reconstruction_diagnostics(
+                memory_targets, memory_estimates, logits
+            )
+            metrics.update(
+                {
+                    f"aux/memory_directional_{name}": value
+                    for name, value in directional.items()
+                }
+            )
             terminal_value = torch.stack(
                 [layer_states[:, -1] for layer_states in trajectory], dim=0
             )
-            self.metrics.update(
+            terminal_targets = [
+                self.terminal_target.transpose(0, 1).expand(
+                    terminal_value.size(1), -1, -1
+                )
+            ]
+            terminal_estimates = [terminal_value.transpose(0, 1)]
+            terminal_directional = directional_reconstruction_diagnostics(
+                terminal_targets, terminal_estimates, logits
+            )
+            metrics.update(
                 {
                     "aux/terminal_reconstruction_mse": (
                         terminal_reconstruction_mse(
@@ -514,9 +647,13 @@ class RNNAuxLM(nn.Module):
                     "aux/terminal_target_second_moment": (
                         self.terminal_target.detach().float().square().mean()
                     ),
+                    **{
+                        f"aux/terminal_directional_{name}": value
+                        for name, value in terminal_directional.items()
+                    },
                 }
             )
-        return aux_loss
+        return aux_loss, components, metrics, memory_targets, memory_estimates
 
     def forward(
         self,
@@ -566,19 +703,115 @@ class RNNAuxLM(nn.Module):
         if not compute_aux:
             self.metrics = {}
             self.loss_components = {}
+            self.scale_loss_components = {}
             return (
                 AuxCausalLMOutput(logits=logits, aux_loss=logits.new_zeros(())),
                 terminal_state,
             )
 
-        offsets = self._sample_offsets(batch_size, input_ids.device)
-        aux_loss = self._compute_auxiliary_loss(
-            input_ids,
-            token_stream,
-            initial_state,
-            trajectory,
-            offsets,
-            logits,
-            compute_diagnostics,
-        )
+        aggregate = {
+            name: logits.new_zeros(())
+            for name in ("chunk_ce", "discrete_ce", "memory_nll", "terminal_nll")
+        }
+        self.scale_loss_components = {}
+        scale_metrics = {}
+        all_memory_targets = []
+        all_memory_estimates = []
+        first_scale_metrics = None
+        for chunk_size in self.aux_chunk_sizes:
+            offsets = self._sample_offsets(
+                batch_size, input_ids.device, chunk_size=chunk_size
+            )
+            (
+                _,
+                components,
+                metrics,
+                memory_targets,
+                memory_estimates,
+            ) = self._compute_auxiliary_loss(
+                input_ids,
+                token_stream,
+                initial_state,
+                trajectory,
+                offsets,
+                chunk_size,
+                logits,
+                compute_diagnostics,
+            )
+            self.scale_loss_components[chunk_size] = components
+            if first_scale_metrics is None:
+                first_scale_metrics = metrics
+            for name in aggregate:
+                aggregate[name] = aggregate[name] + components[name]
+            scale_metrics.update(
+                {
+                    f"aux/scale_{chunk_size}/{name.removeprefix('aux/')}": value
+                    for name, value in metrics.items()
+                }
+            )
+            all_memory_targets.extend(memory_targets)
+            all_memory_estimates.extend(memory_estimates)
+        aux_loss = sum(aggregate.values())
+        self.loss_components = {**aggregate, "total": aux_loss}
+        self.metrics = {
+            **{
+                f"aux/{name}": value.detach()
+                for name, value in self.loss_components.items()
+            },
+            "aux/rho": self.rho.detach().reshape(()),
+            "aux/rho_mean": self.rho.detach().reshape(()),
+            "aux/tau": self.tau.detach().reshape(()),
+            "aux/tau_mean": self.tau.detach().reshape(()),
+            "aux/memory_vmf_kappa": self._configured_vmf_kappa(
+                "memory"
+            ).detach().reshape(()),
+            "aux/terminal_vmf_kappa": self._configured_vmf_kappa(
+                "terminal"
+            ).detach().reshape(()),
+            "aux/num_chunk_scales": logits.detach().new_tensor(
+                float(len(self.aux_chunk_sizes))
+            ),
+            "aux/probe_only": logits.detach().new_tensor(
+                float(self.auxiliary_probe_only)
+            ),
+            **scale_metrics,
+        }
+        if compute_diagnostics:
+            pooled_memory_targets = (
+                [torch.cat(all_memory_targets, dim=0)]
+                if all_memory_targets else []
+            )
+            pooled_memory_estimates = (
+                [torch.cat(all_memory_estimates, dim=0)]
+                if all_memory_estimates else []
+            )
+            diagnostics = memory_reconstruction_diagnostics(
+                pooled_memory_targets, pooled_memory_estimates, logits
+            )
+            self.metrics.update(
+                {
+                    "aux/memory_reconstruction_mse": diagnostics["residual_mse"],
+                    **{
+                        f"aux/memory_{name}": value
+                        for name, value in diagnostics.items()
+                    },
+                }
+            )
+            directional = directional_reconstruction_diagnostics(
+                pooled_memory_targets, pooled_memory_estimates, logits
+            )
+            self.metrics.update(
+                {
+                    f"aux/memory_directional_{name}": value
+                    for name, value in directional.items()
+                }
+            )
+            if first_scale_metrics is not None:
+                self.metrics.update(
+                    {
+                        name: value
+                        for name, value in first_scale_metrics.items()
+                        if name.startswith("aux/terminal_")
+                    }
+                )
         return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), terminal_state

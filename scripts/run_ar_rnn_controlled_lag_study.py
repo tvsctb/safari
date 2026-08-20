@@ -82,6 +82,15 @@ def evaluation_command(
         "--rho", str(trial.rho),
         "--tau", str(trial.tau),
         "--chunk-size", str(trial.chunk_size),
+        "--aux-chunk-sizes",
+        ",".join(
+            str(value)
+            for value in (trial.aux_chunk_sizes or (trial.chunk_size,))
+        ),
+        "--state-aux-distribution", trial.state_aux_distribution,
+        "--vmf-kappa-mode", trial.vmf_kappa_mode,
+        "--memory-vmf-kappa", str(trial.memory_vmf_kappa),
+        "--terminal-vmf-kappa", str(trial.terminal_vmf_kappa),
         "--examples-per-lag", str(args.examples_per_lag),
         "--base-batch-size", str(args.base_batch_size),
         "--dataset-seed", str(args.dataset_seed),

@@ -45,6 +45,9 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
         n_layer=3,
         vocab_size=20,
         chunk_size=args.chunk_size,
+        aux_chunk_sizes=tuple(
+            int(value) for value in args.aux_chunk_sizes.split(",") if value
+        ),
         chunk_offset="random",
         dropout=0.0,
         activation=args.activation,
@@ -52,6 +55,10 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
         recurrent_identity_scale=args.recurrent_identity_scale,
         rho=args.rho,
         tau=args.tau,
+        state_aux_distribution=args.state_aux_distribution,
+        vmf_kappa_mode=args.vmf_kappa_mode,
+        memory_vmf_kappa=args.memory_vmf_kappa,
+        terminal_vmf_kappa=args.terminal_vmf_kappa,
         auxiliary_probe_only=args.probe_only,
         stop_gradient_memory_target=False,
         stop_gradient_memory_observation=False,
@@ -161,6 +168,11 @@ def log_wandb(report: dict, checkpoint: Path, args: argparse.Namespace) -> None:
         "rho": args.rho,
         "tau": args.tau,
         "chunk_size": args.chunk_size,
+        "aux_chunk_sizes": args.aux_chunk_sizes,
+        "state_aux_distribution": args.state_aux_distribution,
+        "vmf_kappa_mode": args.vmf_kappa_mode,
+        "memory_vmf_kappa": args.memory_vmf_kappa,
+        "terminal_vmf_kappa": args.terminal_vmf_kappa,
         "condition_memory_reconstruction_on_boundary": (
             args.condition_memory_reconstruction_on_boundary
         ),
@@ -213,6 +225,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rho", type=float, default=16.0)
     parser.add_argument("--tau", type=float, required=True)
     parser.add_argument("--chunk-size", type=int, default=4)
+    parser.add_argument("--aux-chunk-sizes", default="4")
+    parser.add_argument(
+        "--state-aux-distribution", choices=("gaussian", "vmf"), default="gaussian"
+    )
+    parser.add_argument(
+        "--vmf-kappa-mode", choices=("fixed", "learned"), default="fixed"
+    )
+    parser.add_argument("--memory-vmf-kappa", type=float, default=1.0)
+    parser.add_argument("--terminal-vmf-kappa", type=float, default=1.0)
     parser.add_argument(
         "--condition-memory-reconstruction-on-boundary", action="store_true"
     )

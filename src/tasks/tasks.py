@@ -773,6 +773,24 @@ class AuxLMTask(LMTask):
                         self._current_aux_weight,
                     )
                 )
+                for scale, scale_components in getattr(
+                    model, "scale_loss_components", {}
+                ).items():
+                    weighted_scale, _ = weighted_aux_components(
+                        scale_components, self._current_aux_component_weights
+                    )
+                    scale_metrics = auxiliary_gradient_norm_metrics(
+                        model,
+                        w["metric_loss"],
+                        weighted_scale,
+                        self._current_aux_weight,
+                    )
+                    w["aux_metrics"].update(
+                        {
+                            f"{name}/scale_{scale}": value
+                            for name, value in scale_metrics.items()
+                        }
+                    )
             for name, weight in self._current_aux_component_weights.items():
                 w["aux_metrics"][f"aux/component_weight/{name}"] = (
                     logits.detach().new_tensor(weight)

@@ -12,6 +12,7 @@ model:
   n_layer: 3
   vocab_size: ${dataset.vocab_size}
   chunk_size: 4
+  aux_chunk_sizes: null
   chunk_offset: random
   dropout: 0.0
   activation: tanh
@@ -19,6 +20,10 @@ model:
   recurrent_identity_scale: 1.0
   rho: 1.0
   tau: 1.0
+  state_aux_distribution: gaussian
+  vmf_kappa_mode: fixed
+  memory_vmf_kappa: 1.0
+  terminal_vmf_kappa: 1.0
   auxiliary_probe_only: false
   stop_gradient_memory_target: false
   stop_gradient_memory_observation: false

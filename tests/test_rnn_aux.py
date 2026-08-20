@@ -15,11 +15,12 @@ class RNNAuxLMTest(unittest.TestCase):
         self.targets = torch.randint(0, 20, (8, 11))
 
     def make_model(self, **options):
+        chunk_size = options.pop("chunk_size", 4)
         return RNNAuxLM(
             d_model=8,
             n_layer=1,
             vocab_size=20,
-            chunk_size=4,
+            chunk_size=chunk_size,
             **options,
         )
 
@@ -191,6 +192,109 @@ class RNNAuxLMTest(unittest.TestCase):
         self.assertGreater(first.unique().numel(), 1)
         self.assertGreaterEqual(first.min().item(), 0)
         self.assertLess(first.max().item(), model.chunk_size)
+
+    def test_explicit_single_scale_is_exactly_the_legacy_scalar_path(self):
+        legacy = self.make_model()
+        explicit = self.make_model(aux_chunk_sizes=[4])
+        explicit.load_state_dict(legacy.state_dict())
+        legacy.train()
+        explicit.train()
+        rng = torch.random.get_rng_state()
+        first, first_state = legacy(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        torch.random.set_rng_state(rng)
+        second, second_state = explicit(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        torch.testing.assert_close(first.logits, second.logits, rtol=0, atol=0)
+        torch.testing.assert_close(first_state, second_state, rtol=0, atol=0)
+        torch.testing.assert_close(first.aux_loss, second.aux_loss, rtol=0, atol=0)
+
+    def test_multiscale_loss_is_sum_of_complete_individual_scale_losses(self):
+        multi = self.make_model(aux_chunk_sizes=[2, 4], chunk_offset=0).eval()
+        scale2 = self.make_model(
+            chunk_size=2, aux_chunk_sizes=[2], chunk_offset=0
+        ).eval()
+        scale4 = self.make_model(aux_chunk_sizes=[4], chunk_offset=0).eval()
+        scale2.load_state_dict(multi.state_dict())
+        scale4.load_state_dict(multi.state_dict())
+        combined, _ = multi(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        only2, _ = scale2(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        only4, _ = scale4(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        torch.testing.assert_close(combined.aux_loss, only2.aux_loss + only4.aux_loss)
+        self.assertEqual(set(multi.scale_loss_components), {2, 4})
+
+    def test_chunk_one_has_discrete_and_memory_but_no_chunk_ce(self):
+        model = self.make_model(
+            chunk_size=1,
+            aux_chunk_sizes=[1],
+            chunk_offset=0,
+            use_terminal_loss=False,
+        )
+        output, _ = model(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        torch.testing.assert_close(
+            model.loss_components["chunk_ce"], output.aux_loss.new_zeros(())
+        )
+        self.assertGreater(model.loss_components["discrete_ce"].item(), 0.0)
+        self.assertGreater(model.loss_components["memory_nll"].abs().item(), 0.0)
+
+    def test_vmf_fixed_and_learned_have_proper_finite_losses_and_kappa_gradients(self):
+        fixed = self.make_model(
+            chunk_offset=0,
+            state_aux_distribution="vmf",
+            vmf_kappa_mode="fixed",
+            memory_vmf_kappa=3.0,
+            terminal_vmf_kappa=5.0,
+        )
+        fixed_output, _ = fixed(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        self.assertTrue(torch.isfinite(fixed_output.aux_loss))
+        learned = self.make_model(
+            chunk_offset=0,
+            state_aux_distribution="vmf",
+            vmf_kappa_mode="learned",
+            memory_vmf_kappa=3.0,
+            terminal_vmf_kappa=5.0,
+        )
+        learned_output, _ = learned(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        learned_output.aux_loss.backward()
+        self.assertTrue(torch.isfinite(learned_output.aux_loss))
+        self.assertIsNotNone(learned.log_memory_vmf_kappa.grad)
+        self.assertIsNotNone(learned.log_terminal_vmf_kappa.grad)
+        self.assertTrue(learned.log_memory_vmf_kappa._no_weight_decay)
+        self.assertTrue(learned.log_terminal_vmf_kappa._no_weight_decay)
+        self.assertTrue(learned.terminal_target._no_weight_decay)
+
+    def test_vmf_terminal_direction_does_not_shift_forward_initialization(self):
+        torch.manual_seed(991)
+        gaussian = self.make_model(state_aux_distribution="gaussian")
+        torch.manual_seed(991)
+        vmf = self.make_model(state_aux_distribution="vmf")
+        gaussian_forward = (
+            gaussian.embedding.weight,
+            gaussian.initial_state,
+            *tuple(gaussian.rnn.parameters()),
+        )
+        vmf_forward = (
+            vmf.embedding.weight,
+            vmf.initial_state,
+            *tuple(vmf.rnn.parameters()),
+        )
+        for actual, expected in zip(vmf_forward, gaussian_forward):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertGreater(vmf.terminal_target.norm().item(), 0.0)
 
     def test_random_offset_evaluation_is_fixed_zero(self):
         model = self.make_model()
