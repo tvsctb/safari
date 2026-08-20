@@ -1,0 +1,29 @@
+name: ar-rnn-multiscale-vmf-preflight-20260821-v4
+description: Corrected GPU preflight for multiscale/SG and GG/VV RNN studies
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-1
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach 68d0ee54321327d6b79e1f6f2e79066dffc5d5a9
+      test "$(git rev-parse HEAD)" = "68d0ee54321327d6b79e1f6f2e79066dffc5d5a9"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "1"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "1"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_rnn_aux tests.test_aux_models \
+        tests.test_ar_rnn_study tests.test_ar_rnn_controlled_lag_study \
+        tests.test_ar_rnn_k_chunk_sg_study tests.test_ar_rnn_vmf_study
+      PYTHONPATH=.:scripts python scripts/run_ar_rnn_k_chunk_sg_study.py \
+        --output-root /output/ar-rnn-k-chunk-sg-preflight-20260821-v4 \
+        --gpu-ids 0 --workers-per-gpu 1 \
+        --group-prefix unused-main --preflight-only
+      PYTHONPATH=.:scripts python scripts/run_ar_rnn_vmf_study.py \
+        --output-root /output/ar-rnn-vmf-preflight-20260821-v4 \
+        --gpu-ids 0 --workers-per-gpu 1 \
+        --group-prefix unused-vmf --preflight-only
+      touch /output/RNN_MULTISCALE_VMF_PREFLIGHT_OK
+    workdir: /workspace
