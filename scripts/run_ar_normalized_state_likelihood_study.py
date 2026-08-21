@@ -31,7 +31,7 @@ def run_vmf_fused_optimizer_probe(gpu_id: int) -> None:
         n_layer=3,
         vocab_size=20,
         chunk_size=4,
-        chunk_offset="sequence",
+        chunk_offset="random",
         activation="tanh",
         recurrent_init="orthogonal",
         normalized_state=True,
