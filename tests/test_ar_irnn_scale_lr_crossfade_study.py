@@ -19,6 +19,7 @@ class IRNNScaleLRCrossfadeStudyTest(unittest.TestCase):
         self.assertEqual(len(trials), 8)
         self.assertEqual(len({trial.track for trial in trials}), 4)
         for trial in trials:
+            self.assertEqual(trial.max_epochs, 400)
             self.assertEqual(trial.rho, 8.0)
             self.assertEqual(trial.tau, 243.242356581615)
             self.assertEqual(trial.memory_scale_target_mode, "learned")

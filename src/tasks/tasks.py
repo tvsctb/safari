@@ -378,6 +378,7 @@ _AUX_COMPONENT_NAMES = (
     "memory_nll",
     "terminal_nll",
     "terminal_chunk",
+    "state_scale",
 )
 
 

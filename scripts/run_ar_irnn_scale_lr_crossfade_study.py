@@ -9,14 +9,13 @@ import os
 import random
 import statistics
 import subprocess
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from run_ar_rmt_scale_study import (
     FULL_EPOCHS,
     FULL_WARMUP_STEPS,
     HELDOUT_SEEDS,
-    SCREEN_EPOCHS,
     TUNING_SEEDS,
     StudyController,
     atomic_json,
@@ -96,7 +95,7 @@ def make_trial(
     )
 
 
-def tuning_trials(max_epochs: int = SCREEN_EPOCHS) -> list[RNNTrial]:
+def tuning_trials(max_epochs: int = FULL_EPOCHS) -> list[RNNTrial]:
     return [
         make_trial(condition, seed, "tuning", max_epochs=max_epochs)
         for condition in conditions()
@@ -329,8 +328,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     gpu_ids = [int(value) for value in args.gpu_ids.split(",") if value]
-    screen = tuning_trials()
-    if len(screen) != 8:
+    tuning = tuning_trials()
+    if len(tuning) != 8:
         raise RuntimeError("unexpected crossfade tuning cardinality")
     atomic_json(
         args.output_root / "plan.json",
@@ -342,10 +341,9 @@ def main() -> int:
             "crossfade_steps": CROSSFADE_STEPS,
             "target_lr_final": 0.0,
             "gaussian_lr_initial": 0.0,
-            "screen_epochs": SCREEN_EPOCHS,
-            "full_epochs": FULL_EPOCHS,
-            "screen_training_runs": 8,
-            "full_tuning_evaluation_runs": 4,
+            "tuning_epochs": FULL_EPOCHS,
+            "tuning_training_runs": 8,
+            "tuning_evaluation_runs": 8,
             "heldout_training_runs": 4,
             "heldout_evaluation_runs": 4,
             "conditions": [asdict(value) for value in conditions()],
@@ -371,32 +369,21 @@ def main() -> int:
         command_builder=build_rnn_command,
         dry_run=args.dry_run,
     )
-    status = controller.run_trials(screen)
-    if not all(status.get(trial.trial_id, False) for trial in screen):
-        raise RuntimeError("one or more crossfade screens failed")
+    status = controller.run_trials(tuning)
+    if not all(status.get(trial.trial_id, False) for trial in tuning):
+        raise RuntimeError("one or more full crossfade tuning runs failed")
     if args.dry_run:
         return 0
 
-    screen_ranking = rank_validation(screen, tuning_root)
-    atomic_json(args.output_root / "screen-ranking.json", screen_ranking)
-    shortlist_labels = {
-        row["condition"]["label"] for row in screen_ranking[:2]
-    }
-    shortlist = [
-        replace(trial, max_epochs=FULL_EPOCHS)
-        for trial in screen
-        if trial.track in shortlist_labels
-    ]
-    status = controller.run_trials(shortlist)
-    if not all(status.get(trial.trial_id, False) for trial in shortlist):
-        raise RuntimeError("one or more crossfade shortlist continuations failed")
+    validation_ranking = rank_validation(tuning, tuning_root)
+    atomic_json(args.output_root / "validation-ranking.json", validation_ranking)
     run_evaluations(
-        shortlist,
+        tuning,
         tuning_root,
         gpu_ids,
         _eval_args(args, args.tuning_eval_group),
     )
-    full_ranking = rank_controlled_lag(shortlist, tuning_root)
+    full_ranking = rank_controlled_lag(tuning, tuning_root)
     atomic_json(args.output_root / "full-ranking.json", full_ranking)
     selected = CrossfadeCondition(**full_ranking[0]["condition"])
 
@@ -425,7 +412,7 @@ def main() -> int:
         args.output_root / "crossfade-report.json",
         {
             "selected_condition": asdict(selected),
-            "screen_ranking": screen_ranking,
+            "validation_ranking": validation_ranking,
             "full_ranking": full_ranking,
             "heldout": aggregate_heldout(heldout, heldout_root),
         },

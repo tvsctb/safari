@@ -442,12 +442,39 @@ class AuxTaskMetricTest(unittest.TestCase):
         components = {
             "chunk_ce": torch.tensor(2.0),
             "memory_nll": torch.tensor(3.0),
-            "total": torch.tensor(5.0),
+            "state_scale": torch.tensor(4.0),
+            "total": torch.tensor(9.0),
         }
         weighted, total = weighted_aux_components(components, middle)
         self.assertAlmostEqual(weighted["chunk_ce"].item(), 1.2)
         self.assertEqual(weighted["memory_nll"].item(), 3.0)
-        self.assertAlmostEqual(total.item(), 4.2, places=6)
+        self.assertEqual(weighted["state_scale"].item(), 4.0)
+        self.assertAlmostEqual(total.item(), 8.2, places=6)
+
+    def test_state_scale_survives_task_weighting_and_has_gradient(self):
+        class ScaleModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.target = torch.nn.Parameter(torch.tensor(1.0))
+
+        model = ScaleModel()
+        state_scale = (model.target - 3.0).square()
+        weighted, total = weighted_aux_components(
+            {"state_scale": state_scale, "total": state_scale},
+            normalize_aux_component_weights({}, "weights"),
+        )
+        self.assertIn("state_scale", weighted)
+        torch.testing.assert_close(total, state_scale)
+        gradient = torch.autograd.grad(total, model.target, retain_graph=True)[0]
+        torch.testing.assert_close(gradient, torch.tensor(-4.0))
+        metrics = auxiliary_gradient_norm_metrics(
+            model,
+            model.target.square(),
+            weighted,
+            aux_weight=0.1,
+        )
+        self.assertIn("grad_norm/all/aux/state_scale", metrics)
+        self.assertGreater(metrics["grad_norm/all/aux/state_scale"].item(), 0.0)
 
     def test_component_weights_reject_unknown_names(self):
         with self.assertRaisesRegex(ValueError, "unknown components"):
