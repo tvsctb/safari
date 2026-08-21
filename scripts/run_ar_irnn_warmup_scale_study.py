@@ -138,7 +138,10 @@ def run_calibration(
             check=False,
         )
     if completed.returncode != 0 or not output.exists():
-        raise RuntimeError(f"memory-scale calibration failed for seed {seed}: {log}")
+        details = log.read_text(encoding="utf-8", errors="replace")
+        raise RuntimeError(
+            f"memory-scale calibration failed for seed {seed}: {log}\n{details}"
+        )
     return json.loads(output.read_text(encoding="utf-8"))
 
 

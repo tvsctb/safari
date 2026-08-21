@@ -108,18 +108,22 @@ def calibrate(model: RNNAuxLM, args: argparse.Namespace) -> dict:
     dataset = calibration_dataset(args)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     log_rms_values = []
-    diagnostic_batch = None
     with torch.inference_mode():
         for batch in loader:
             input_ids = batch[0].to(device)
-            if diagnostic_batch is None:
-                diagnostic_batch = tuple(value.to(device) for value in batch)
             _, states = trajectory(model, input_ids)
             log_rms_values.append(model.trajectory_log_rms(states).cpu())
     log_rms = torch.cat(log_rms_values).double()
     target_log_rms = float(log_rms.mean())
     target_rms = math.exp(target_log_rms)
 
+    # Fetch the gradient-calibration batch outside inference_mode. Tensors
+    # created inside inference_mode cannot be saved for backward, even when
+    # they themselves do not require gradients (embedding backward saves the
+    # integer indices).
+    diagnostic_batch = tuple(
+        value.to(device) for value in next(iter(loader))
+    )
     model.train()
     input_ids, labels, _ = diagnostic_batch
     outputs, states = trajectory(model, input_ids)
