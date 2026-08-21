@@ -1,0 +1,43 @@
+name: ar-irnn-scale-lr-crossfade-20260823-v2
+description: Fully automated K5 iRNN state-scale objective and rho/tau LR crossfade study; all tuning conditions run 400 epochs
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-2
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach e39dcee
+      test "$(git rev-parse HEAD)" = "e39dceea229e8a5cbae12dd2e3ae1ddd038ad2c1"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_aux_models \
+        tests.test_rnn_aux \
+        tests.test_rnn_scale_crossfade \
+        tests.test_ar_rmt_scale_study \
+        tests.test_ar_rnn_study \
+        tests.test_assoc_recall_active_associations \
+        tests.test_controlled_assoc_recall \
+        tests.test_ar_rnn_controlled_lag_study \
+        tests.test_ar_irnn_scale_lr_crossfade_study
+      PYTHONPATH=.:scripts python scripts/run_ar_irnn_scale_lr_crossfade_study.py \
+        --output-root /output/ar-irnn-scale-lr-crossfade-20260823-v2 \
+        --gpu-ids 0,1 \
+        --workers-per-gpu 8 \
+        --wandb-project aux-assc-recall \
+        --wandb-entity bjjin07-x \
+        --tuning-training-group ar-irnn-scale-lr-crossfade-tuning-train-20260823-v2 \
+        --tuning-eval-group ar-irnn-scale-lr-crossfade-tuning-eval-20260823-v2 \
+        --heldout-training-group ar-irnn-scale-lr-crossfade-heldout-train-20260823-v2 \
+        --heldout-eval-group ar-irnn-scale-lr-crossfade-heldout-eval-20260823-v2 \
+        --examples-per-lag 10000 \
+        --base-batch-size 128 \
+        --dataset-seed 20260823
+      touch /output/AR_IRNN_SCALE_LR_CROSSFADE_COMPLETE
+    workdir: /workspace
