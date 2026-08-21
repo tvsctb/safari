@@ -55,6 +55,23 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
         recurrent_identity_scale=args.recurrent_identity_scale,
         rho=args.rho,
         tau=args.tau,
+        gaussian_scale_mode=args.gaussian_scale_mode,
+        gaussian_scale_learning_start_step=(
+            args.gaussian_scale_learning_start_step
+        ),
+        gaussian_scale_learning_rate=args.gaussian_scale_learning_rate,
+        memory_scale_target=(
+            args.memory_scale_target
+            if args.memory_scale_constraint_weight > 0
+            else None
+        ),
+        memory_scale_constraint_weight=args.memory_scale_constraint_weight,
+        memory_scale_constraint_start_step=(
+            args.memory_scale_constraint_start_step
+        ),
+        memory_scale_constraint_ramp_steps=(
+            args.memory_scale_constraint_ramp_steps
+        ),
         state_aux_distribution=args.state_aux_distribution,
         vmf_kappa_mode=args.vmf_kappa_mode,
         memory_vmf_kappa=args.memory_vmf_kappa,
@@ -167,6 +184,13 @@ def log_wandb(report: dict, checkpoint: Path, args: argparse.Namespace) -> None:
         "probe_only": args.probe_only,
         "rho": args.rho,
         "tau": args.tau,
+        "gaussian_scale_mode": args.gaussian_scale_mode,
+        "gaussian_scale_learning_start_step": (
+            args.gaussian_scale_learning_start_step
+        ),
+        "gaussian_scale_learning_rate": args.gaussian_scale_learning_rate,
+        "memory_scale_target": args.memory_scale_target,
+        "memory_scale_constraint_weight": args.memory_scale_constraint_weight,
         "chunk_size": args.chunk_size,
         "aux_chunk_sizes": args.aux_chunk_sizes,
         "state_aux_distribution": args.state_aux_distribution,
@@ -224,6 +248,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--probe-only", action="store_true")
     parser.add_argument("--rho", type=float, default=16.0)
     parser.add_argument("--tau", type=float, required=True)
+    parser.add_argument(
+        "--gaussian-scale-mode", choices=("fixed", "learned"), default="fixed"
+    )
+    parser.add_argument("--gaussian-scale-learning-start-step", type=int, default=0)
+    parser.add_argument("--gaussian-scale-learning-rate", type=float, default=1e-5)
+    parser.add_argument("--memory-scale-target", type=float, default=1.0)
+    parser.add_argument("--memory-scale-constraint-weight", type=float, default=0.0)
+    parser.add_argument("--memory-scale-constraint-start-step", type=int, default=0)
+    parser.add_argument("--memory-scale-constraint-ramp-steps", type=int, default=0)
     parser.add_argument("--chunk-size", type=int, default=4)
     parser.add_argument("--aux-chunk-sizes", default="4")
     parser.add_argument(

@@ -81,6 +81,23 @@ def evaluation_command(
         "--recurrent-identity-scale", str(trial.recurrent_identity_scale),
         "--rho", str(trial.rho),
         "--tau", str(trial.tau),
+        "--gaussian-scale-mode", trial.gaussian_scale_mode,
+        "--gaussian-scale-learning-start-step",
+        str(trial.gaussian_scale_learning_start_step),
+        "--gaussian-scale-learning-rate",
+        str(trial.gaussian_scale_learning_rate),
+        "--memory-scale-target",
+        str(trial.memory_scale_target or 1.0),
+        "--memory-scale-constraint-weight",
+        str(trial.memory_scale_constraint_weight),
+        "--memory-scale-constraint-start-step",
+        str(
+            trial.memory_scale_constraint_start_step
+            if trial.memory_scale_constraint_start_step is not None
+            else trial.gaussian_scale_learning_start_step
+        ),
+        "--memory-scale-constraint-ramp-steps",
+        str(trial.memory_scale_constraint_ramp_steps),
         "--chunk-size", str(trial.chunk_size),
         "--aux-chunk-sizes",
         ",".join(

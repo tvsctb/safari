@@ -62,6 +62,15 @@ class RNNTrial:
     vmf_kappa_mode: str = "fixed"
     memory_vmf_kappa: float = 1.0
     terminal_vmf_kappa: float = 1.0
+    gaussian_scale_mode: str = "fixed"
+    gaussian_scale_learning_start_step: int = 0
+    gaussian_scale_learning_rate: float = 1e-5
+    memory_scale_target: float | None = None
+    memory_scale_constraint_weight: float = 0.0
+    memory_scale_constraint_start_step: int | None = None
+    memory_scale_constraint_ramp_steps: int = 0
+    initial_checkpoint: str | None = None
+    loader_seed: int | None = None
 
 
 def make_baseline_trials() -> List[RNNTrial]:
@@ -152,7 +161,7 @@ def build_rnn_command(
         f"+dataset.seed={trial.seed}",
         "dataset.num_active_associations="
         f"{trial.num_active_associations if trial.num_active_associations is not None else 'null'}",
-        f"dataset.loader_seed={trial.seed}",
+        f"dataset.loader_seed={trial.seed if trial.loader_seed is None else trial.loader_seed}",
         "loader.num_workers=0",
         "scheduler=linear_warmup",
         f"scheduler.num_warmup_steps={FULL_WARMUP_STEPS}",
@@ -170,6 +179,19 @@ def build_rnn_command(
         f"model.recurrent_identity_scale={trial.recurrent_identity_scale}",
         f"model.rho={trial.rho}",
         f"model.tau={trial.tau}",
+        f"model.gaussian_scale_mode={trial.gaussian_scale_mode}",
+        "model.gaussian_scale_learning_start_step="
+        f"{trial.gaussian_scale_learning_start_step}",
+        "model.gaussian_scale_learning_rate="
+        f"{trial.gaussian_scale_learning_rate}",
+        "model.memory_scale_target="
+        f"{trial.memory_scale_target if trial.memory_scale_target is not None else 'null'}",
+        "model.memory_scale_constraint_weight="
+        f"{trial.memory_scale_constraint_weight}",
+        "model.memory_scale_constraint_start_step="
+        f"{trial.memory_scale_constraint_start_step if trial.memory_scale_constraint_start_step is not None else 'null'}",
+        "model.memory_scale_constraint_ramp_steps="
+        f"{trial.memory_scale_constraint_ramp_steps}",
         f"model.state_aux_distribution={trial.state_aux_distribution}",
         f"model.vmf_kappa_mode={trial.vmf_kappa_mode}",
         f"model.memory_vmf_kappa={trial.memory_vmf_kappa}",
@@ -205,6 +227,8 @@ def build_rnn_command(
     ]
     if checkpoint.exists():
         command.append(f"train.ckpt={checkpoint}")
+    elif trial.initial_checkpoint is not None:
+        command.append(f"train.ckpt={trial.initial_checkpoint}")
     return command
 
 

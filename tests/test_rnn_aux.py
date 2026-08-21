@@ -156,7 +156,7 @@ class RNNAuxLMTest(unittest.TestCase):
         hidden = torch.randn(1, 3, 8)
         torch.testing.assert_close(model._predict_memory(hidden), hidden)
 
-    def test_forward_has_four_aux_components_and_finite_diagnostics(self):
+    def test_forward_has_aux_components_and_finite_diagnostics(self):
         model = self.make_model(chunk_offset=0)
         output, state = model(
             self.inputs,
@@ -174,6 +174,7 @@ class RNNAuxLMTest(unittest.TestCase):
                 "discrete_ce",
                 "memory_nll",
                 "terminal_nll",
+                "state_scale",
                 "total",
             },
         )
@@ -181,6 +182,101 @@ class RNNAuxLMTest(unittest.TestCase):
         self.assertTrue(
             torch.isfinite(model.metrics["aux/memory_relative_mse"])
         )
+
+    def test_learned_gaussian_scales_are_frozen_until_configured_step(self):
+        model = self.make_model(
+            chunk_offset=0,
+            gaussian_scale_mode="learned",
+            gaussian_scale_learning_start_step=2,
+            gaussian_scale_learning_rate=1e-5,
+            use_chunk_loss=False,
+            use_discrete_loss=False,
+            use_terminal_loss=False,
+        )
+        self.assertEqual(
+            model.log_rho._optim, {"lr": 1e-5, "weight_decay": 0.0}
+        )
+        first, _ = model(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        first_gradient = torch.autograd.grad(
+            first.aux_loss, model.log_rho, allow_unused=True
+        )[0]
+        self.assertIsNone(first_gradient)
+        model.aux_training_step.fill_(2)
+        second, _ = model(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        second_gradient = torch.autograd.grad(second.aux_loss, model.log_rho)[0]
+        self.assertGreater(second_gradient.abs().item(), 0.0)
+        self.assertEqual(model.aux_training_step.item(), 3)
+
+    def test_trajectory_scale_constraint_uses_all_post_input_states(self):
+        model = self.make_model(
+            chunk_offset=0,
+            gaussian_scale_mode="learned",
+            memory_scale_target=1.0,
+            memory_scale_constraint_weight=2.0,
+            memory_scale_constraint_start_step=0,
+            memory_scale_constraint_ramp_steps=0,
+            use_chunk_loss=False,
+            use_discrete_loss=False,
+            use_memory_loss=False,
+            use_terminal_loss=False,
+        )
+        initial = model.default_state(self.inputs.size(0))
+        _, _, trajectory = model.rnn(
+            model.embedding(self.inputs), initial, return_trajectory=True
+        )
+        log_rms = model.trajectory_log_rms(trajectory)
+        expected = 2.0 * log_rms.square().mean()
+        output, _ = model(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        torch.testing.assert_close(model.loss_components["state_scale"], expected)
+        torch.testing.assert_close(output.aux_loss, expected)
+        self.assertEqual(model.metrics["aux/state_scale_active"].item(), 1.0)
+
+    def test_fixed_and_learned_scale_modes_do_not_change_forward_initialization(self):
+        torch.manual_seed(123)
+        fixed = self.make_model(rho=8.0, tau=12.0)
+        torch.manual_seed(123)
+        learned = self.make_model(
+            rho=8.0,
+            tau=12.0,
+            gaussian_scale_mode="learned",
+            gaussian_scale_learning_start_step=100,
+        )
+        fixed_forward = (
+            fixed.embedding.weight,
+            fixed.initial_state,
+            *tuple(fixed.rnn.parameters()),
+        )
+        learned_forward = (
+            learned.embedding.weight,
+            learned.initial_state,
+            *tuple(learned.rnn.parameters()),
+        )
+        for actual, expected in zip(learned_forward, fixed_forward):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertEqual(learned._configured_gaussian_scale("rho").item(), 8.0)
+        self.assertEqual(learned._configured_gaussian_scale("tau").item(), 12.0)
+
+    def test_calibrated_branch_target_survives_nan_warmup_checkpoint(self):
+        warmup = self.make_model(
+            gaussian_scale_mode="learned",
+            gaussian_scale_learning_start_step=100,
+        )
+        warmup.aux_training_step.fill_(12)
+        branch = self.make_model(
+            gaussian_scale_mode="learned",
+            gaussian_scale_learning_start_step=12,
+            memory_scale_target=3.25,
+            memory_scale_constraint_weight=0.5,
+        )
+        branch.load_state_dict(warmup.state_dict(), strict=True)
+        self.assertEqual(branch.aux_training_step.item(), 12)
+        self.assertEqual(branch.memory_scale_target.item(), 3.25)
 
     def test_random_offsets_are_per_sequence_and_seed_reproducible(self):
         model = self.make_model()

@@ -1,4 +1,5 @@
 import copy
+import math
 from collections import defaultdict
 from collections.abc import Sequence
 
@@ -135,6 +136,13 @@ class RNNAuxLM(nn.Module):
         recurrent_identity_scale=1.0,
         rho=1.0,
         tau=1.0,
+        gaussian_scale_mode="fixed",
+        gaussian_scale_learning_start_step=0,
+        gaussian_scale_learning_rate=1e-5,
+        memory_scale_target=None,
+        memory_scale_constraint_weight=0.0,
+        memory_scale_constraint_start_step=None,
+        memory_scale_constraint_ramp_steps=0,
         state_aux_distribution="gaussian",
         vmf_kappa_mode="fixed",
         memory_vmf_kappa=1.0,
@@ -180,6 +188,60 @@ class RNNAuxLM(nn.Module):
             raise ValueError("dropout must be in [0, 1)")
         if rho <= 0 or tau <= 0:
             raise ValueError("rho and tau must be positive")
+        if gaussian_scale_mode not in {"fixed", "learned"}:
+            raise ValueError("gaussian_scale_mode must be fixed or learned")
+        if (
+            isinstance(gaussian_scale_learning_start_step, bool)
+            or not isinstance(gaussian_scale_learning_start_step, int)
+            or gaussian_scale_learning_start_step < 0
+        ):
+            raise ValueError(
+                "gaussian_scale_learning_start_step must be a non-negative integer"
+            )
+        if (
+            isinstance(gaussian_scale_learning_rate, bool)
+            or not math.isfinite(float(gaussian_scale_learning_rate))
+            or float(gaussian_scale_learning_rate) <= 0
+        ):
+            raise ValueError(
+                "gaussian_scale_learning_rate must be finite and positive"
+            )
+        if memory_scale_target is not None and (
+            isinstance(memory_scale_target, bool)
+            or not math.isfinite(float(memory_scale_target))
+            or float(memory_scale_target) <= 0
+        ):
+            raise ValueError("memory_scale_target must be finite and positive")
+        if (
+            isinstance(memory_scale_constraint_weight, bool)
+            or not math.isfinite(float(memory_scale_constraint_weight))
+            or float(memory_scale_constraint_weight) < 0
+        ):
+            raise ValueError(
+                "memory_scale_constraint_weight must be finite and non-negative"
+            )
+        if memory_scale_constraint_start_step is None:
+            memory_scale_constraint_start_step = gaussian_scale_learning_start_step
+        if (
+            isinstance(memory_scale_constraint_start_step, bool)
+            or not isinstance(memory_scale_constraint_start_step, int)
+            or memory_scale_constraint_start_step < 0
+        ):
+            raise ValueError(
+                "memory_scale_constraint_start_step must be a non-negative integer"
+            )
+        if (
+            isinstance(memory_scale_constraint_ramp_steps, bool)
+            or not isinstance(memory_scale_constraint_ramp_steps, int)
+            or memory_scale_constraint_ramp_steps < 0
+        ):
+            raise ValueError(
+                "memory_scale_constraint_ramp_steps must be a non-negative integer"
+            )
+        if memory_scale_constraint_weight > 0 and memory_scale_target is None:
+            raise ValueError(
+                "a positive memory_scale_constraint_weight requires memory_scale_target"
+            )
         if state_aux_distribution not in {"gaussian", "vmf"}:
             raise ValueError("state_aux_distribution must be gaussian or vmf")
         if vmf_kappa_mode not in {"fixed", "learned"}:
@@ -215,6 +277,23 @@ class RNNAuxLM(nn.Module):
         self.chunk_offset = chunk_offset
         self.state_aux_distribution = state_aux_distribution
         self.vmf_kappa_mode = vmf_kappa_mode
+        self.gaussian_scale_mode = gaussian_scale_mode
+        self.gaussian_scale_learning_start_step = (
+            gaussian_scale_learning_start_step
+        )
+        self.memory_scale_constraint_weight = float(
+            memory_scale_constraint_weight
+        )
+        self.memory_scale_constraint_start_step = (
+            memory_scale_constraint_start_step
+        )
+        self.memory_scale_constraint_ramp_steps = (
+            memory_scale_constraint_ramp_steps
+        )
+        self._has_memory_scale_constraint = (
+            memory_scale_constraint_weight > 0
+            and memory_scale_target is not None
+        )
         self.auxiliary_probe_only = auxiliary_probe_only
         self.stop_gradient_memory_target = stop_gradient_memory_target
         self.stop_gradient_memory_observation = stop_gradient_memory_observation
@@ -256,8 +335,31 @@ class RNNAuxLM(nn.Module):
         self.terminal_target = nn.Parameter(
             torch.zeros(n_layer, 1, d_model)
         )
-        self.register_buffer("rho", torch.tensor(float(rho)))
-        self.register_buffer("tau", torch.tensor(float(tau)))
+        if gaussian_scale_mode == "learned":
+            scale_optim = {
+                "lr": float(gaussian_scale_learning_rate),
+                "weight_decay": 0.0,
+            }
+            self.log_rho = nn.Parameter(torch.tensor(float(rho)).log())
+            self.log_tau = nn.Parameter(torch.tensor(float(tau)).log())
+            self.log_rho._optim = dict(scale_optim)
+            self.log_tau._optim = dict(scale_optim)
+        else:
+            self.register_buffer("rho", torch.tensor(float(rho)))
+            self.register_buffer("tau", torch.tensor(float(tau)))
+        self.register_buffer(
+            "memory_scale_target",
+            torch.tensor(
+                float("nan")
+                if memory_scale_target is None
+                else float(memory_scale_target)
+            ),
+        )
+        # This counter is part of checkpoint state. It therefore remains exact
+        # when several continuations branch from one fixed-scale warmup.
+        self.register_buffer(
+            "aux_training_step", torch.zeros((), dtype=torch.long)
+        )
         if vmf_kappa_mode == "learned":
             self.log_memory_vmf_kappa = nn.Parameter(
                 torch.tensor(float(memory_vmf_kappa)).log()
@@ -314,6 +416,53 @@ class RNNAuxLM(nn.Module):
         nn.init.zeros_(second.weight)
         nn.init.zeros_(second.bias)
 
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        # Checkpoints predating the warmup-scale study have no training-step
+        # buffer. Treat them as step zero while retaining strict loading for
+        # every learned weight and all other state.
+        inserted = []
+        replaced_target = None
+        step_key = prefix + "aux_training_step"
+        target_key = prefix + "memory_scale_target"
+        if step_key not in state_dict:
+            state_dict[step_key] = self.aux_training_step.detach().clone()
+            inserted.append(step_key)
+        if target_key not in state_dict:
+            state_dict[target_key] = self.memory_scale_target.detach().clone()
+            inserted.append(target_key)
+        elif (
+            torch.isfinite(self.memory_scale_target)
+            and not torch.isfinite(state_dict[target_key])
+        ):
+            # A branch supplies its calibrated target in configuration while
+            # its common warmup checkpoint intentionally contains NaN.
+            replaced_target = state_dict[target_key]
+            state_dict[target_key] = self.memory_scale_target.detach().clone()
+        try:
+            super()._load_from_state_dict(
+                state_dict,
+                prefix,
+                local_metadata,
+                strict,
+                missing_keys,
+                unexpected_keys,
+                error_msgs,
+            )
+        finally:
+            for key in inserted:
+                state_dict.pop(key, None)
+            if replaced_target is not None:
+                state_dict[target_key] = replaced_target
+
     def _lm_logits(self, hidden):
         return F.linear(hidden, self.embedding.weight)
 
@@ -345,6 +494,87 @@ class RNNAuxLM(nn.Module):
                 min=1e-4, max=1e4
             )
         return getattr(self, f"{name}_vmf_kappa")
+
+    def _configured_gaussian_scale(self, name):
+        if self.gaussian_scale_mode == "fixed":
+            return getattr(self, name)
+        value = getattr(self, f"log_{name}").exp().clamp(
+            min=1e-4, max=1e4
+        )
+        active = (
+            self.aux_training_step >= self.gaussian_scale_learning_start_step
+        ).to(dtype=value.dtype)
+        return value.detach() + active * (value - value.detach())
+
+    @staticmethod
+    def trajectory_log_rms(trajectory):
+        """Return one per-coordinate log RMS for each sequence.
+
+        Every recurrent state M_1..M_K is included exactly once. The learned
+        initial state M_0 and any AUX chunk/offset sampling are deliberately
+        absent, so this gauge is a property of the forward memory trajectory.
+        """
+        if not trajectory:
+            raise ValueError("trajectory must contain at least one RNN layer")
+        per_layer_second_moment = torch.stack(
+            [states.float().square().mean(dim=(1, 2)) for states in trajectory],
+            dim=0,
+        )
+        per_sample_second_moment = per_layer_second_moment.mean(dim=0)
+        return 0.5 * torch.log(per_sample_second_moment.clamp_min(1e-20))
+
+    def _memory_scale_constraint(self, trajectory, reference):
+        log_rms = self.trajectory_log_rms(trajectory)
+        current_geometric_rms = log_rms.detach().mean().exp()
+        current_arithmetic_rms = log_rms.detach().exp().mean()
+        loss = reference.new_zeros(())
+        ramp = reference.new_zeros(())
+        active = reference.new_zeros(())
+        if self._has_memory_scale_constraint:
+            active = (
+                self.aux_training_step
+                >= self.memory_scale_constraint_start_step
+            ).to(device=reference.device, dtype=reference.dtype)
+            if self.memory_scale_constraint_ramp_steps == 0:
+                ramp = active
+            else:
+                ramp = (
+                    (
+                        self.aux_training_step.to(reference)
+                        - self.memory_scale_constraint_start_step
+                        + 1
+                    )
+                    / self.memory_scale_constraint_ramp_steps
+                ).clamp(min=0.0, max=1.0)
+            target_log_rms = self.memory_scale_target.float().log()
+            loss = (
+                self.memory_scale_constraint_weight
+                * ramp
+                * (log_rms - target_log_rms).square().mean()
+            )
+        target = self.memory_scale_target.detach().to(reference)
+        ratio = current_geometric_rms.to(reference) / target
+        if not self._has_memory_scale_constraint:
+            ratio = reference.new_tensor(float("nan"))
+        metrics = {
+            "aux/state_scale_loss": loss.detach(),
+            "aux/state_scale_active": active.detach(),
+            "aux/state_scale_ramp": ramp.detach(),
+            "aux/state_scale_target_rms": target,
+            "aux/state_scale_geometric_rms": current_geometric_rms.to(reference),
+            "aux/state_scale_arithmetic_rms": current_arithmetic_rms.to(reference),
+            "aux/state_scale_ratio": ratio,
+            "aux/gaussian_scale_learning_active": (
+                (
+                    self.aux_training_step
+                    >= self.gaussian_scale_learning_start_step
+                ).to(device=reference.device, dtype=reference.dtype)
+                if self.gaussian_scale_mode == "learned"
+                else reference.detach().new_zeros(())
+            ),
+            "aux/training_step": self.aux_training_step.detach().to(reference),
+        }
+        return loss, metrics
 
     def _sample_offsets(self, batch_size, device, chunk_size=None):
         chunk_size = self.chunk_size if chunk_size is None else chunk_size
@@ -537,7 +767,7 @@ class RNNAuxLM(nn.Module):
                 loss_memory = gaussian_nll_sum(
                     memory_targets,
                     memory_estimates,
-                    self.rho,
+                    self._configured_gaussian_scale("rho"),
                     logits,
                     batch_size,
                     scale_axis=1,
@@ -562,7 +792,7 @@ class RNNAuxLM(nn.Module):
             if self.state_aux_distribution == "gaussian":
                 loss_terminal = terminal_gaussian_nll(
                     terminal_value,
-                    self.tau,
+                    self._configured_gaussian_scale("tau"),
                     batch_size,
                     scale_axis=0,
                     target=self.terminal_target,
@@ -590,10 +820,10 @@ class RNNAuxLM(nn.Module):
             "aux/memory_nll": loss_memory.detach(),
             "aux/terminal_nll": loss_terminal.detach(),
             "aux/total": aux_loss.detach(),
-            "aux/rho": self.rho.detach().reshape(()),
-            "aux/rho_mean": self.rho.detach().reshape(()),
-            "aux/tau": self.tau.detach().reshape(()),
-            "aux/tau_mean": self.tau.detach().reshape(()),
+            "aux/rho": self._configured_gaussian_scale("rho").detach().reshape(()),
+            "aux/rho_mean": self._configured_gaussian_scale("rho").detach().reshape(()),
+            "aux/tau": self._configured_gaussian_scale("tau").detach().reshape(()),
+            "aux/tau_mean": self._configured_gaussian_scale("tau").detach().reshape(()),
             "aux/probe_only": logits.detach().new_tensor(
                 float(self.auxiliary_probe_only)
             ),
@@ -717,8 +947,18 @@ class RNNAuxLM(nn.Module):
 
         aggregate = {
             name: logits.new_zeros(())
-            for name in ("chunk_ce", "discrete_ce", "memory_nll", "terminal_nll")
+            for name in (
+                "chunk_ce",
+                "discrete_ce",
+                "memory_nll",
+                "terminal_nll",
+                "state_scale",
+            )
         }
+        state_scale_loss, state_scale_metrics = self._memory_scale_constraint(
+            trajectory, logits
+        )
+        aggregate["state_scale"] = state_scale_loss
         self.scale_loss_components = {}
         scale_metrics = {}
         all_memory_targets = []
@@ -747,7 +987,9 @@ class RNNAuxLM(nn.Module):
             self.scale_loss_components[chunk_size] = components
             if first_scale_metrics is None:
                 first_scale_metrics = metrics
-            for name in aggregate:
+            for name in (
+                "chunk_ce", "discrete_ce", "memory_nll", "terminal_nll"
+            ):
                 aggregate[name] = aggregate[name] + components[name]
             scale_metrics.update(
                 {
@@ -764,10 +1006,10 @@ class RNNAuxLM(nn.Module):
                 f"aux/{name}": value.detach()
                 for name, value in self.loss_components.items()
             },
-            "aux/rho": self.rho.detach().reshape(()),
-            "aux/rho_mean": self.rho.detach().reshape(()),
-            "aux/tau": self.tau.detach().reshape(()),
-            "aux/tau_mean": self.tau.detach().reshape(()),
+            "aux/rho": self._configured_gaussian_scale("rho").detach().reshape(()),
+            "aux/rho_mean": self._configured_gaussian_scale("rho").detach().reshape(()),
+            "aux/tau": self._configured_gaussian_scale("tau").detach().reshape(()),
+            "aux/tau_mean": self._configured_gaussian_scale("tau").detach().reshape(()),
             "aux/memory_vmf_kappa": self._configured_vmf_kappa(
                 "memory"
             ).detach().reshape(()),
@@ -780,6 +1022,7 @@ class RNNAuxLM(nn.Module):
             "aux/probe_only": logits.detach().new_tensor(
                 float(self.auxiliary_probe_only)
             ),
+            **state_scale_metrics,
             **scale_metrics,
         }
         if compute_diagnostics:
@@ -820,4 +1063,6 @@ class RNNAuxLM(nn.Module):
                         if name.startswith("aux/terminal_")
                     }
                 )
+        if self.training:
+            self.aux_training_step.add_(1)
         return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), terminal_state
