@@ -9,14 +9,90 @@ import statistics
 from dataclasses import asdict, replace
 from pathlib import Path
 
+import torch
+
 from run_ar_rmt_scale_study import FULL_EPOCHS, HELDOUT_SEEDS, StudyController, atomic_json
 from run_ar_rnn_controlled_lag_study import run_evaluations
 from run_ar_rnn_study import RNNTrial, build_rnn_command
+from src.models.sequence.rnn_aux import RNNAuxLM
 
 
 ACTIVE_ASSOCIATIONS = 5
 CONDITIONS = ("noaux", "gaussian", "vmf")
 EXPECTED_RUNS = len(CONDITIONS) * len(HELDOUT_SEEDS)
+
+
+def run_vmf_fused_optimizer_probe(gpu_id: int) -> None:
+    """Exercise and diagnose the exact learned-kappa fused optimizer path."""
+    device = torch.device(f"cuda:{gpu_id}")
+    torch.manual_seed(20260822)
+    model = RNNAuxLM(
+        d_model=64,
+        n_layer=3,
+        vocab_size=20,
+        chunk_size=4,
+        chunk_offset="sequence",
+        activation="tanh",
+        recurrent_init="orthogonal",
+        normalized_state=True,
+        state_aux_distribution="vmf",
+        vmf_kappa_mode="learned",
+        state_likelihood_granularity="layer",
+        memory_vmf_kappa=1.0,
+        terminal_vmf_kappa=1.0,
+        exclude_initial_memory_reconstruction=True,
+        use_terminal_loss=True,
+    ).to(device)
+    named_parameters = list(model.named_parameters())
+    regular = [parameter for _, parameter in named_parameters if not hasattr(parameter, "_optim")]
+    special = [parameter for _, parameter in named_parameters if hasattr(parameter, "_optim")]
+    optimizer = torch.optim.AdamW(
+        regular, lr=1e-3, weight_decay=0.1, fused=True
+    )
+    optimizer.add_param_group(
+        {"params": special, "lr": 1e-4, "weight_decay": 0.0}
+    )
+    tokens = torch.randint(0, 20, (32, 42), device=device)
+    output, _ = model(tokens, targets=tokens, aux_tokens=tokens)
+    output.aux_loss.backward()
+    try:
+        optimizer.step()
+    except RuntimeError:
+        names = {id(parameter): name for name, parameter in named_parameters}
+        for group_index, group in enumerate(optimizer.param_groups):
+            for parameter in group["params"]:
+                if parameter.grad is None:
+                    continue
+                state = optimizer.state.get(parameter, {})
+                fields = {
+                    "group": group_index,
+                    "name": names[id(parameter)],
+                    "parameter": (
+                        str(parameter.dtype),
+                        str(parameter.device),
+                        str(parameter.layout),
+                        tuple(parameter.stride()),
+                    ),
+                    "gradient": (
+                        str(parameter.grad.dtype),
+                        str(parameter.grad.device),
+                        str(parameter.grad.layout),
+                        tuple(parameter.grad.stride()),
+                    ),
+                    "state": {
+                        key: (
+                            str(value.dtype),
+                            str(value.device),
+                            str(value.layout),
+                            tuple(value.stride()),
+                        )
+                        for key, value in state.items()
+                        if isinstance(value, torch.Tensor)
+                    },
+                }
+                print(f"VMF_FUSED_PARAMETER={fields}", flush=True)
+        raise
+    print("VMF_FUSED_OPTIMIZER_PROBE_OK", flush=True)
 
 
 def make_trial(condition: str, seed: int, max_epochs: int = FULL_EPOCHS) -> RNNTrial:
@@ -241,6 +317,7 @@ def main() -> int:
         },
     )
     if not args.dry_run:
+        run_vmf_fused_optimizer_probe(gpu_ids[0])
         run_preflight(args.output_root / "preflight", gpu_ids[0])
         if args.preflight_only:
             return 0
