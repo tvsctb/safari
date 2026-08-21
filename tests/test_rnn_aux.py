@@ -187,7 +187,7 @@ class RNNAuxLMTest(unittest.TestCase):
         model = self.make_model(
             chunk_offset=0,
             gaussian_scale_mode="learned",
-            gaussian_scale_learning_start_step=2,
+            gaussian_scale_learning_start_step=1,
             gaussian_scale_learning_rate=1e-5,
             use_chunk_loss=False,
             use_discrete_loss=False,
@@ -203,13 +203,12 @@ class RNNAuxLMTest(unittest.TestCase):
             first.aux_loss, model.log_rho, allow_unused=True
         )[0]
         self.assertIsNone(first_gradient)
-        model.aux_training_step.fill_(2)
         second, _ = model(
             self.inputs, targets=self.targets, aux_tokens=self.targets
         )
         second_gradient = torch.autograd.grad(second.aux_loss, model.log_rho)[0]
         self.assertGreater(second_gradient.abs().item(), 0.0)
-        self.assertEqual(model.aux_training_step.item(), 3)
+        self.assertEqual(model.aux_training_step.item(), 2)
 
     def test_trajectory_scale_constraint_uses_all_post_input_states(self):
         model = self.make_model(

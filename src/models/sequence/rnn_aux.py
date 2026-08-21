@@ -360,6 +360,12 @@ class RNNAuxLM(nn.Module):
         self.register_buffer(
             "aux_training_step", torch.zeros((), dtype=torch.long)
         )
+        # Keep the hot-path gate as a Python integer. A tensor comparison plus
+        # multiplication would produce a zero-valued gradient for log_rho and
+        # log_tau during warmup, causing Adam to advance their step counters
+        # even though their values were intended to be completely frozen.
+        # The persistent tensor remains the checkpoint source of truth.
+        self._aux_training_step_value = 0
         if vmf_kappa_mode == "learned":
             self.log_memory_vmf_kappa = nn.Parameter(
                 torch.tensor(float(memory_vmf_kappa)).log()
@@ -457,6 +463,9 @@ class RNNAuxLM(nn.Module):
                 unexpected_keys,
                 error_msgs,
             )
+            self._aux_training_step_value = int(
+                self.aux_training_step.detach().cpu().item()
+            )
         finally:
             for key in inserted:
                 state_dict.pop(key, None)
@@ -501,10 +510,12 @@ class RNNAuxLM(nn.Module):
         value = getattr(self, f"log_{name}").exp().clamp(
             min=1e-4, max=1e4
         )
-        active = (
-            self.aux_training_step >= self.gaussian_scale_learning_start_step
-        ).to(dtype=value.dtype)
-        return value.detach() + active * (value - value.detach())
+        if (
+            self._aux_training_step_value
+            < self.gaussian_scale_learning_start_step
+        ):
+            return value.detach()
+        return value
 
     @staticmethod
     def trajectory_log_rms(trajectory):
@@ -531,21 +542,28 @@ class RNNAuxLM(nn.Module):
         ramp = reference.new_zeros(())
         active = reference.new_zeros(())
         if self._has_memory_scale_constraint:
-            active = (
-                self.aux_training_step
+            is_active = (
+                self._aux_training_step_value
                 >= self.memory_scale_constraint_start_step
-            ).to(device=reference.device, dtype=reference.dtype)
+            )
+            active = reference.new_tensor(float(is_active))
             if self.memory_scale_constraint_ramp_steps == 0:
                 ramp = active
             else:
-                ramp = (
-                    (
-                        self.aux_training_step.to(reference)
-                        - self.memory_scale_constraint_start_step
-                        + 1
+                ramp = reference.new_tensor(
+                    min(
+                        1.0,
+                        max(
+                            0.0,
+                            (
+                                self._aux_training_step_value
+                                - self.memory_scale_constraint_start_step
+                                + 1
+                            )
+                            / self.memory_scale_constraint_ramp_steps,
+                        ),
                     )
-                    / self.memory_scale_constraint_ramp_steps
-                ).clamp(min=0.0, max=1.0)
+                )
             target_log_rms = self.memory_scale_target.float().log()
             loss = (
                 self.memory_scale_constraint_weight
@@ -565,10 +583,12 @@ class RNNAuxLM(nn.Module):
             "aux/state_scale_arithmetic_rms": current_arithmetic_rms.to(reference),
             "aux/state_scale_ratio": ratio,
             "aux/gaussian_scale_learning_active": (
-                (
-                    self.aux_training_step
-                    >= self.gaussian_scale_learning_start_step
-                ).to(device=reference.device, dtype=reference.dtype)
+                reference.new_tensor(
+                    float(
+                        self._aux_training_step_value
+                        >= self.gaussian_scale_learning_start_step
+                    )
+                )
                 if self.gaussian_scale_mode == "learned"
                 else reference.detach().new_zeros(())
             ),
@@ -1064,5 +1084,6 @@ class RNNAuxLM(nn.Module):
                     }
                 )
         if self.training:
-            self.aux_training_step.add_(1)
+            self._aux_training_step_value += 1
+            self.aux_training_step.fill_(self._aux_training_step_value)
         return AuxCausalLMOutput(logits=logits, aux_loss=aux_loss), terminal_state
