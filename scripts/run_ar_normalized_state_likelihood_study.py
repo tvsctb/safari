@@ -101,11 +101,13 @@ def run_preflight(output_root: Path, gpu_id: int) -> None:
     )
     status = controller.run_trials(checks)
     if not all(status.get(trial.trial_id, False) for trial in checks):
+        print(f"PREFLIGHT_STATUS={status}", flush=True)
         for trial in checks:
             log_path = output_root / "trials" / trial.trial_id / "train.log"
             if log_path.exists():
                 print(f"\n===== PREFLIGHT LOG: {trial.trial_id} =====", flush=True)
-                print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+                print(text[-20_000:], flush=True)
         raise RuntimeError("normalized-state GPU preflight failed")
     for trial in checks:
         root = output_root / "trials" / trial.trial_id
@@ -217,6 +219,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--examples-per-lag", type=int, default=10000)
     parser.add_argument("--base-batch-size", type=int, default=128)
     parser.add_argument("--dataset-seed", type=int, default=20260822)
+    parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -239,6 +242,8 @@ def main() -> int:
     )
     if not args.dry_run:
         run_preflight(args.output_root / "preflight", gpu_ids[0])
+        if args.preflight_only:
+            return 0
     controller = StudyController(
         args.output_root,
         gpu_ids,
