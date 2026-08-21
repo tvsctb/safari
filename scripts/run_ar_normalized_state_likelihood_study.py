@@ -92,7 +92,7 @@ def run_preflight(output_root: Path, gpu_id: int) -> None:
     controller = StudyController(
         output_root,
         (gpu_id,),
-        len(checks),
+        1,
         "unused",
         "unused",
         "unused",
@@ -101,6 +101,11 @@ def run_preflight(output_root: Path, gpu_id: int) -> None:
     )
     status = controller.run_trials(checks)
     if not all(status.get(trial.trial_id, False) for trial in checks):
+        for trial in checks:
+            log_path = output_root / "trials" / trial.trial_id / "train.log"
+            if log_path.exists():
+                print(f"\n===== PREFLIGHT LOG: {trial.trial_id} =====", flush=True)
+                print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
         raise RuntimeError("normalized-state GPU preflight failed")
     for trial in checks:
         root = output_root / "trials" / trial.trial_id
