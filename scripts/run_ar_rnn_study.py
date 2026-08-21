@@ -66,11 +66,17 @@ class RNNTrial:
     gaussian_scale_learning_start_step: int = 0
     gaussian_scale_learning_rate: float = 1e-5
     memory_scale_target: float | None = None
+    memory_scale_target_mode: str = "fixed"
+    memory_scale_target_learning_rate: float = 1e-3
     memory_scale_constraint_weight: float = 0.0
     memory_scale_constraint_start_step: int | None = None
     memory_scale_constraint_ramp_steps: int = 0
     initial_checkpoint: str | None = None
     loader_seed: int | None = None
+    scale_crossfade_enabled: bool = False
+    scale_crossfade_steps: int = 12560
+    target_lr_final: float = 0.0
+    gaussian_lr_initial: float = 0.0
 
 
 def make_baseline_trials() -> List[RNNTrial]:
@@ -186,6 +192,9 @@ def build_rnn_command(
         f"{trial.gaussian_scale_learning_rate}",
         "model.memory_scale_target="
         f"{trial.memory_scale_target if trial.memory_scale_target is not None else 'null'}",
+        f"model.memory_scale_target_mode={trial.memory_scale_target_mode}",
+        "model.memory_scale_target_learning_rate="
+        f"{trial.memory_scale_target_learning_rate}",
         "model.memory_scale_constraint_weight="
         f"{trial.memory_scale_constraint_weight}",
         "model.memory_scale_constraint_start_step="
@@ -223,6 +232,17 @@ def build_rnn_command(
         "+wandb.resume=allow",
         f"callbacks.model_checkpoint.dirpath={checkpoint_dir}",
         f"callbacks.study_summary.result_path={trial_root / 'result.json'}",
+        "callbacks.rnn_scale_crossfade.enabled="
+        f"{str(trial.scale_crossfade_enabled).lower()}",
+        "callbacks.rnn_scale_crossfade.transition_steps="
+        f"{trial.scale_crossfade_steps}",
+        "callbacks.rnn_scale_crossfade.target_lr_initial="
+        f"{trial.memory_scale_target_learning_rate}",
+        f"callbacks.rnn_scale_crossfade.target_lr_final={trial.target_lr_final}",
+        "callbacks.rnn_scale_crossfade.gaussian_lr_initial="
+        f"{trial.gaussian_lr_initial}",
+        "callbacks.rnn_scale_crossfade.gaussian_lr_final="
+        f"{trial.gaussian_scale_learning_rate}",
         f"hydra.run.dir={trial_root / 'hydra'}",
     ]
     if checkpoint.exists():

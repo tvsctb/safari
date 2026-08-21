@@ -53,4 +53,5 @@ callbacks = {
     "rich_progress_bar": "pytorch_lightning.callbacks.RichProgressBar",
     "progressive_resizing": "src.callbacks.progressive_resizing.ProgressiveResizing",
     "study_summary": "src.callbacks.study_summary.StudySummary",
+    "rnn_scale_crossfade": "src.callbacks.rnn_scale_crossfade.RNNScaleCrossfade",
 }

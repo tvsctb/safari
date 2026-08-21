@@ -140,6 +140,8 @@ class RNNAuxLM(nn.Module):
         gaussian_scale_learning_start_step=0,
         gaussian_scale_learning_rate=1e-5,
         memory_scale_target=None,
+        memory_scale_target_mode="fixed",
+        memory_scale_target_learning_rate=1e-3,
         memory_scale_constraint_weight=0.0,
         memory_scale_constraint_start_step=None,
         memory_scale_constraint_ramp_steps=0,
@@ -190,6 +192,10 @@ class RNNAuxLM(nn.Module):
             raise ValueError("rho and tau must be positive")
         if gaussian_scale_mode not in {"fixed", "learned"}:
             raise ValueError("gaussian_scale_mode must be fixed or learned")
+        if memory_scale_target_mode not in {"fixed", "learned"}:
+            raise ValueError(
+                "memory_scale_target_mode must be fixed or learned"
+            )
         if (
             isinstance(gaussian_scale_learning_start_step, bool)
             or not isinstance(gaussian_scale_learning_start_step, int)
@@ -212,6 +218,14 @@ class RNNAuxLM(nn.Module):
             or float(memory_scale_target) <= 0
         ):
             raise ValueError("memory_scale_target must be finite and positive")
+        if (
+            isinstance(memory_scale_target_learning_rate, bool)
+            or not math.isfinite(float(memory_scale_target_learning_rate))
+            or float(memory_scale_target_learning_rate) <= 0
+        ):
+            raise ValueError(
+                "memory_scale_target_learning_rate must be finite and positive"
+            )
         if (
             isinstance(memory_scale_constraint_weight, bool)
             or not math.isfinite(float(memory_scale_constraint_weight))
@@ -238,7 +252,11 @@ class RNNAuxLM(nn.Module):
             raise ValueError(
                 "memory_scale_constraint_ramp_steps must be a non-negative integer"
             )
-        if memory_scale_constraint_weight > 0 and memory_scale_target is None:
+        if (
+            memory_scale_constraint_weight > 0
+            and memory_scale_target is None
+            and memory_scale_target_mode == "fixed"
+        ):
             raise ValueError(
                 "a positive memory_scale_constraint_weight requires memory_scale_target"
             )
@@ -278,6 +296,7 @@ class RNNAuxLM(nn.Module):
         self.state_aux_distribution = state_aux_distribution
         self.vmf_kappa_mode = vmf_kappa_mode
         self.gaussian_scale_mode = gaussian_scale_mode
+        self.memory_scale_target_mode = memory_scale_target_mode
         self.gaussian_scale_learning_start_step = (
             gaussian_scale_learning_start_step
         )
@@ -292,7 +311,10 @@ class RNNAuxLM(nn.Module):
         )
         self._has_memory_scale_constraint = (
             memory_scale_constraint_weight > 0
-            and memory_scale_target is not None
+            and (
+                memory_scale_target is not None
+                or memory_scale_target_mode == "learned"
+            )
         )
         self.auxiliary_probe_only = auxiliary_probe_only
         self.stop_gradient_memory_target = stop_gradient_memory_target
@@ -354,6 +376,24 @@ class RNNAuxLM(nn.Module):
                 if memory_scale_target is None
                 else float(memory_scale_target)
             ),
+        )
+        if memory_scale_target_mode == "learned":
+            initial_target = (
+                1.0 if memory_scale_target is None else float(memory_scale_target)
+            )
+            self.log_memory_scale_target = nn.Parameter(
+                torch.tensor(initial_target).log()
+            )
+            self.log_memory_scale_target._optim = {
+                "lr": float(memory_scale_target_learning_rate),
+                "weight_decay": 0.0,
+            }
+        self.register_buffer(
+            "memory_scale_target_initialized",
+            torch.tensor(memory_scale_target is not None, dtype=torch.bool),
+        )
+        self._memory_scale_target_initialized_value = (
+            memory_scale_target is not None
         )
         # This counter is part of checkpoint state. It therefore remains exact
         # when several continuations branch from one fixed-scale warmup.
@@ -439,6 +479,7 @@ class RNNAuxLM(nn.Module):
         replaced_target = None
         step_key = prefix + "aux_training_step"
         target_key = prefix + "memory_scale_target"
+        target_initialized_key = prefix + "memory_scale_target_initialized"
         if step_key not in state_dict:
             state_dict[step_key] = self.aux_training_step.detach().clone()
             inserted.append(step_key)
@@ -446,13 +487,19 @@ class RNNAuxLM(nn.Module):
             state_dict[target_key] = self.memory_scale_target.detach().clone()
             inserted.append(target_key)
         elif (
-            torch.isfinite(self.memory_scale_target)
+            self.memory_scale_target_mode == "fixed"
+            and torch.isfinite(self.memory_scale_target)
             and not torch.isfinite(state_dict[target_key])
         ):
             # A branch supplies its calibrated target in configuration while
             # its common warmup checkpoint intentionally contains NaN.
             replaced_target = state_dict[target_key]
             state_dict[target_key] = self.memory_scale_target.detach().clone()
+        if target_initialized_key not in state_dict:
+            state_dict[target_initialized_key] = (
+                self.memory_scale_target_initialized.detach().clone()
+            )
+            inserted.append(target_initialized_key)
         try:
             super()._load_from_state_dict(
                 state_dict,
@@ -465,6 +512,9 @@ class RNNAuxLM(nn.Module):
             )
             self._aux_training_step_value = int(
                 self.aux_training_step.detach().cpu().item()
+            )
+            self._memory_scale_target_initialized_value = bool(
+                self.memory_scale_target_initialized.detach().cpu().item()
             )
         finally:
             for key in inserted:
@@ -517,6 +567,28 @@ class RNNAuxLM(nn.Module):
             return value.detach()
         return value
 
+    def _configured_memory_scale_target(self, log_rms=None):
+        if self.memory_scale_target_mode == "fixed":
+            return self.memory_scale_target
+        if not self._memory_scale_target_initialized_value:
+            # Lightning runs validation sanity checks before the first
+            # optimizer step.  Only a training trajectory may choose the
+            # data-derived initial target.
+            if log_rms is None or not self.training:
+                return self.log_memory_scale_target.exp()
+            with torch.no_grad():
+                initial_log_rms = log_rms.detach().mean()
+                if (
+                    torch.distributed.is_available()
+                    and torch.distributed.is_initialized()
+                ):
+                    torch.distributed.all_reduce(initial_log_rms)
+                    initial_log_rms.div_(torch.distributed.get_world_size())
+                self.log_memory_scale_target.copy_(initial_log_rms)
+                self.memory_scale_target_initialized.fill_(True)
+                self._memory_scale_target_initialized_value = True
+        return self.log_memory_scale_target.exp().clamp(min=1e-4, max=1e4)
+
     @staticmethod
     def trajectory_log_rms(trajectory):
         """Return one per-coordinate log RMS for each sequence.
@@ -564,13 +636,16 @@ class RNNAuxLM(nn.Module):
                         ),
                     )
                 )
-            target_log_rms = self.memory_scale_target.float().log()
+            target = self._configured_memory_scale_target(log_rms)
+            target_log_rms = target.float().log()
             loss = (
                 self.memory_scale_constraint_weight
                 * ramp
                 * (log_rms - target_log_rms).square().mean()
             )
-        target = self.memory_scale_target.detach().to(reference)
+        target = self._configured_memory_scale_target(log_rms).detach().to(
+            reference
+        )
         ratio = current_geometric_rms.to(reference) / target
         if not self._has_memory_scale_constraint:
             ratio = reference.new_tensor(float("nan"))

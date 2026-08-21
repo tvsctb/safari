@@ -65,6 +65,10 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
             if args.memory_scale_constraint_weight > 0
             else None
         ),
+        memory_scale_target_mode=args.memory_scale_target_mode,
+        memory_scale_target_learning_rate=(
+            args.memory_scale_target_learning_rate
+        ),
         memory_scale_constraint_weight=args.memory_scale_constraint_weight,
         memory_scale_constraint_start_step=(
             args.memory_scale_constraint_start_step
@@ -170,6 +174,23 @@ def evaluate(model: RNNAuxLM, args: argparse.Namespace) -> dict:
     }
 
 
+def learned_scale_state(model: RNNAuxLM) -> dict:
+    def scalar(value):
+        value = float(value.detach().cpu())
+        return value if math.isfinite(value) else None
+
+    return {
+        "rho": scalar(model._configured_gaussian_scale("rho")),
+        "tau": scalar(model._configured_gaussian_scale("tau")),
+        "memory_scale_target_rms": scalar(
+            model._configured_memory_scale_target()
+        ),
+        "memory_scale_target_initialized": bool(
+            model.memory_scale_target_initialized.detach().cpu()
+        ),
+    }
+
+
 def log_wandb(report: dict, checkpoint: Path, args: argparse.Namespace) -> None:
     if args.wandb_mode == "disabled":
         return
@@ -190,6 +211,10 @@ def log_wandb(report: dict, checkpoint: Path, args: argparse.Namespace) -> None:
         ),
         "gaussian_scale_learning_rate": args.gaussian_scale_learning_rate,
         "memory_scale_target": args.memory_scale_target,
+        "memory_scale_target_mode": args.memory_scale_target_mode,
+        "memory_scale_target_learning_rate": (
+            args.memory_scale_target_learning_rate
+        ),
         "memory_scale_constraint_weight": args.memory_scale_constraint_weight,
         "chunk_size": args.chunk_size,
         "aux_chunk_sizes": args.aux_chunk_sizes,
@@ -254,6 +279,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gaussian-scale-learning-start-step", type=int, default=0)
     parser.add_argument("--gaussian-scale-learning-rate", type=float, default=1e-5)
     parser.add_argument("--memory-scale-target", type=float, default=1.0)
+    parser.add_argument(
+        "--memory-scale-target-mode",
+        choices=("fixed", "learned"),
+        default="fixed",
+    )
+    parser.add_argument(
+        "--memory-scale-target-learning-rate", type=float, default=1e-3
+    )
     parser.add_argument("--memory-scale-constraint-weight", type=float, default=0.0)
     parser.add_argument("--memory-scale-constraint-start-step", type=int, default=0)
     parser.add_argument("--memory-scale-constraint-ramp-steps", type=int, default=0)
@@ -286,12 +319,14 @@ def main() -> int:
     args = parse_args()
     if not args.checkpoint.exists():
         raise FileNotFoundError(args.checkpoint)
-    report = evaluate(model_from_checkpoint(args.checkpoint, args), args)
+    model = model_from_checkpoint(args.checkpoint, args)
+    report = evaluate(model, args)
     report.update(
         {
             "condition": args.condition,
             "seed": args.seed,
             "checkpoint": str(args.checkpoint),
+            "learned_scale_state": learned_scale_state(model),
         }
     )
     atomic_json(args.output, report)

@@ -236,6 +236,59 @@ class RNNAuxLMTest(unittest.TestCase):
         torch.testing.assert_close(output.aux_loss, expected)
         self.assertEqual(model.metrics["aux/state_scale_active"].item(), 1.0)
 
+    def test_learned_scale_target_initializes_from_trajectory_and_has_gradient(self):
+        model = self.make_model(
+            chunk_offset=0,
+            gaussian_scale_mode="learned",
+            memory_scale_target_mode="learned",
+            memory_scale_target_learning_rate=3e-4,
+            memory_scale_constraint_weight=0.2,
+            memory_scale_constraint_start_step=0,
+            use_chunk_loss=False,
+            use_discrete_loss=False,
+            use_memory_loss=False,
+            use_terminal_loss=False,
+        )
+        self.assertEqual(
+            model.log_memory_scale_target._optim,
+            {"lr": 3e-4, "weight_decay": 0.0},
+        )
+        model(self.inputs, targets=self.targets, aux_tokens=self.targets)
+        self.assertTrue(model.memory_scale_target_initialized.item())
+        self.assertTrue(torch.isfinite(model.log_memory_scale_target))
+
+        with torch.no_grad():
+            model.log_memory_scale_target.add_(torch.log(torch.tensor(2.0)))
+        output, _ = model(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        gradient = torch.autograd.grad(
+            output.aux_loss, model.log_memory_scale_target
+        )[0]
+        self.assertGreater(gradient.abs().item(), 0.0)
+
+    def test_learned_scale_target_checkpoint_preserves_lazy_initialization(self):
+        source = self.make_model(
+            memory_scale_target_mode="learned",
+            memory_scale_constraint_weight=0.2,
+        )
+        restored = self.make_model(
+            memory_scale_target_mode="learned",
+            memory_scale_constraint_weight=0.2,
+        )
+        restored.load_state_dict(source.state_dict(), strict=True)
+        self.assertFalse(restored.memory_scale_target_initialized.item())
+        restored(self.inputs, targets=self.targets, aux_tokens=self.targets)
+        self.assertTrue(restored.memory_scale_target_initialized.item())
+
+    def test_validation_sanity_forward_does_not_initialize_scale_target(self):
+        model = self.make_model(
+            memory_scale_target_mode="learned",
+            memory_scale_constraint_weight=0.2,
+        ).eval()
+        model(self.inputs, targets=self.targets, aux_tokens=self.targets)
+        self.assertFalse(model.memory_scale_target_initialized.item())
+
     def test_fixed_and_learned_scale_modes_do_not_change_forward_initialization(self):
         torch.manual_seed(123)
         fixed = self.make_model(rho=8.0, tau=12.0)

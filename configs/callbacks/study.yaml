@@ -24,3 +24,13 @@ model_checkpoint:
 
 study_summary:
   result_path: ???
+
+rnn_scale_crossfade:
+  enabled: false
+  start_step: 0
+  transition_steps: 12560
+  target_lr_initial: 1e-3
+  target_lr_final: 0.0
+  gaussian_lr_initial: 0.0
+  gaussian_lr_final: 1e-4
+  log_interval: 157
