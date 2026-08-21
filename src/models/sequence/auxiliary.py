@@ -395,8 +395,8 @@ def vmf_log_normalizer_grid(dimension, minimum=1e-4, maximum=1e4, points=4096):
     if not np.all(np.isfinite(log_normalizer)):
         raise RuntimeError("failed to construct a finite vMF normalizer grid")
     return (
-        torch.from_numpy(log_kappa.astype(np.float64)),
-        torch.from_numpy(log_normalizer.astype(np.float64)),
+        torch.from_numpy(log_kappa.astype(np.float32)),
+        torch.from_numpy(log_normalizer.astype(np.float32)),
     )
 
 
@@ -404,7 +404,12 @@ def interpolate_vmf_log_normalizer(kappa, log_kappa_grid, log_normalizer_grid):
     """Linearly interpolate log C_d(kappa) in log-kappa coordinates."""
     if log_kappa_grid.ndim != 1 or log_normalizer_grid.shape != log_kappa_grid.shape:
         raise ValueError("vMF normalizer grids must be equal-length vectors")
-    log_kappa = kappa.double().log().clamp(
+    interpolation_dtype = kappa.dtype
+    if interpolation_dtype not in {torch.float32, torch.float64}:
+        interpolation_dtype = torch.float32
+    log_kappa_grid = log_kappa_grid.to(dtype=interpolation_dtype)
+    log_normalizer_grid = log_normalizer_grid.to(dtype=interpolation_dtype)
+    log_kappa = kappa.to(dtype=interpolation_dtype).log().clamp(
         min=log_kappa_grid[0], max=log_kappa_grid[-1]
     )
     upper = torch.searchsorted(log_kappa_grid, log_kappa).clamp(

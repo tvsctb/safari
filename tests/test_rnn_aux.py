@@ -143,7 +143,15 @@ class RNNAuxLMTest(unittest.TestCase):
             (vmf.log_memory_vmf_kappa, vmf.log_terminal_vmf_kappa),
         )
         self.assertEqual(tuple(vmf.log_memory_vmf_kappa.shape), (3,))
+        self.assertEqual(vmf._vmf_log_kappa_grid.dtype, torch.float32)
+        self.assertEqual(vmf._vmf_log_normalizer_grid.dtype, torch.float32)
         self.assertTrue(all(torch.isfinite(value).all() for value in gradients))
+        self.assertTrue(all(value.dtype == torch.float32 for value in gradients))
+        centered_terminal = (
+            vmf.terminal_target.detach()
+            - vmf.terminal_target.detach().mean(dim=-1, keepdim=True)
+        )
+        self.assertTrue((centered_terminal.norm(dim=-1) > 0).all())
         self.assertIn("aux/memory_centered_layer_2_cosine", vmf.metrics)
 
     def test_centered_vmf_ignores_layerwise_shift_and_positive_scale(self):
