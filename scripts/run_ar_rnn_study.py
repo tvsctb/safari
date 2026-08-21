@@ -50,6 +50,8 @@ class RNNTrial:
     activation: str = "tanh"
     recurrent_init: str = "orthogonal"
     recurrent_identity_scale: float = 1.0
+    normalized_state: bool = False
+    normalization_epsilon: float = 1e-5
     exclude_initial_memory_reconstruction: bool = True
     use_terminal_loss: bool = True
     chunk_size: int = 4
@@ -60,9 +62,11 @@ class RNNTrial:
     stop_gradient_memory_target: bool = False
     state_aux_distribution: str = "gaussian"
     vmf_kappa_mode: str = "fixed"
+    vmf_kappa_learning_rate: float = 1e-4
     memory_vmf_kappa: float = 1.0
     terminal_vmf_kappa: float = 1.0
     gaussian_scale_mode: str = "fixed"
+    state_likelihood_granularity: str = "global"
     gaussian_scale_learning_start_step: int = 0
     gaussian_scale_learning_rate: float = 1e-5
     memory_scale_target: float | None = None
@@ -183,9 +187,13 @@ def build_rnn_command(
         f"model.activation={trial.activation}",
         f"model.recurrent_init={trial.recurrent_init}",
         f"model.recurrent_identity_scale={trial.recurrent_identity_scale}",
+        f"model.normalized_state={str(trial.normalized_state).lower()}",
+        f"model.normalization_epsilon={trial.normalization_epsilon}",
         f"model.rho={trial.rho}",
         f"model.tau={trial.tau}",
         f"model.gaussian_scale_mode={trial.gaussian_scale_mode}",
+        "model.state_likelihood_granularity="
+        f"{trial.state_likelihood_granularity}",
         "model.gaussian_scale_learning_start_step="
         f"{trial.gaussian_scale_learning_start_step}",
         "model.gaussian_scale_learning_rate="
@@ -203,6 +211,7 @@ def build_rnn_command(
         f"{trial.memory_scale_constraint_ramp_steps}",
         f"model.state_aux_distribution={trial.state_aux_distribution}",
         f"model.vmf_kappa_mode={trial.vmf_kappa_mode}",
+        f"model.vmf_kappa_learning_rate={trial.vmf_kappa_learning_rate}",
         f"model.memory_vmf_kappa={trial.memory_vmf_kappa}",
         f"model.terminal_vmf_kappa={trial.terminal_vmf_kappa}",
         f"model.auxiliary_probe_only={str(trial.probe_only).lower()}",

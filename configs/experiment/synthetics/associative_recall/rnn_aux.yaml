@@ -18,9 +18,12 @@ model:
   activation: tanh
   recurrent_init: orthogonal
   recurrent_identity_scale: 1.0
+  normalized_state: false
+  normalization_epsilon: 1e-5
   rho: 1.0
   tau: 1.0
   gaussian_scale_mode: fixed
+  state_likelihood_granularity: global
   gaussian_scale_learning_start_step: 0
   gaussian_scale_learning_rate: 1e-5
   memory_scale_target: null
@@ -31,6 +34,7 @@ model:
   memory_scale_constraint_ramp_steps: 0
   state_aux_distribution: gaussian
   vmf_kappa_mode: fixed
+  vmf_kappa_learning_rate: 1e-4
   memory_vmf_kappa: 1.0
   terminal_vmf_kappa: 1.0
   auxiliary_probe_only: false

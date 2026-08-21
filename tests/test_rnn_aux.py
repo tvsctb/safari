@@ -6,6 +6,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import ListConfig
 
+from src.models.sequence.auxiliary import (
+    centered_layerwise_vmf_nll_sum,
+    vmf_log_normalizer_grid,
+)
 from src.models.sequence.rnn_aux import RNNAuxLM, StackedRNN
 
 
@@ -57,6 +61,111 @@ class RNNAuxLMTest(unittest.TestCase):
         torch.testing.assert_close(outputs[:, 0], expected)
         torch.testing.assert_close(terminal[0], expected)
         torch.testing.assert_close(trajectory[0][:, 0], expected)
+
+    def test_normalized_state_core_uses_ln_memory_and_tanh_output(self):
+        model = self.make_model(normalized_state=True, chunk_offset=0)
+        layer = model.rnn.layers[0]
+        inputs = torch.randn(3, 2, 8)
+        state = torch.randn(1, 3, 8)
+        preactivation_1 = F.linear(inputs[:, 0], layer.weight_ih_l0)
+        preactivation_1 += F.linear(state[0], layer.weight_hh_l0)
+        memory_1 = F.layer_norm(preactivation_1, (8,), eps=layer.epsilon)
+        output_1 = torch.tanh(memory_1 * layer.gamma + layer.beta)
+        preactivation_2 = F.linear(inputs[:, 1], layer.weight_ih_l0)
+        preactivation_2 += F.linear(memory_1, layer.weight_hh_l0)
+        memory_2 = F.layer_norm(preactivation_2, (8,), eps=layer.epsilon)
+        output_2 = torch.tanh(memory_2 * layer.gamma + layer.beta)
+
+        outputs, terminal, trajectory = model.rnn(
+            inputs, state, return_trajectory=True
+        )
+        torch.testing.assert_close(outputs[:, 0], output_1)
+        torch.testing.assert_close(outputs[:, 1], output_2)
+        torch.testing.assert_close(trajectory[0][:, 0], memory_1)
+        torch.testing.assert_close(trajectory[0][:, 1], memory_2)
+        torch.testing.assert_close(terminal[0], memory_2)
+        torch.testing.assert_close(
+            trajectory[0].mean(dim=-1),
+            trajectory[0].new_zeros(trajectory[0].shape[:-1]),
+            atol=2e-6,
+            rtol=0,
+        )
+        self.assertTrue(layer.gamma._no_weight_decay)
+
+    def test_normalized_state_is_parameter_matched_to_native_rnn(self):
+        native = StackedRNN(8, 3, normalized_state=False)
+        normalized = StackedRNN(8, 3, normalized_state=True)
+        self.assertEqual(
+            sum(parameter.numel() for parameter in native.parameters()),
+            sum(parameter.numel() for parameter in normalized.parameters()),
+        )
+
+    def test_normalized_state_layerwise_likelihood_parameters_and_gradients(self):
+        gaussian = RNNAuxLM(
+            d_model=8,
+            n_layer=3,
+            vocab_size=20,
+            chunk_size=4,
+            chunk_offset=0,
+            normalized_state=True,
+            gaussian_scale_mode="learned",
+            state_likelihood_granularity="layer",
+            rho=1.0,
+            tau=1.0,
+        )
+        output, _ = gaussian(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        gradients = torch.autograd.grad(
+            output.aux_loss, (gaussian.log_rho, gaussian.log_tau)
+        )
+        self.assertEqual(tuple(gaussian.log_rho.shape), (3,))
+        self.assertTrue(all(torch.isfinite(value).all() for value in gradients))
+
+        vmf = RNNAuxLM(
+            d_model=8,
+            n_layer=3,
+            vocab_size=20,
+            chunk_size=4,
+            chunk_offset=0,
+            normalized_state=True,
+            state_aux_distribution="vmf",
+            vmf_kappa_mode="learned",
+            state_likelihood_granularity="layer",
+            memory_vmf_kappa=1.0,
+            terminal_vmf_kappa=1.0,
+        )
+        output, _ = vmf(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        gradients = torch.autograd.grad(
+            output.aux_loss,
+            (vmf.log_memory_vmf_kappa, vmf.log_terminal_vmf_kappa),
+        )
+        self.assertEqual(tuple(vmf.log_memory_vmf_kappa.shape), (3,))
+        self.assertTrue(all(torch.isfinite(value).all() for value in gradients))
+        self.assertIn("aux/memory_centered_layer_2_cosine", vmf.metrics)
+
+    def test_centered_vmf_ignores_layerwise_shift_and_positive_scale(self):
+        target = torch.randn(5, 3, 8)
+        estimate = torch.randn(5, 3, 8)
+        scale = torch.tensor([0.5, 2.0, 7.0]).reshape(1, 3, 1)
+        shift = torch.tensor([-4.0, 1.0, 9.0]).reshape(1, 3, 1)
+        log_kappa, log_normalizer = vmf_log_normalizer_grid(7, points=64)
+        kappa = torch.tensor([1.0, 2.0, 3.0])
+        original = centered_layerwise_vmf_nll_sum(
+            [target], [estimate], kappa, log_kappa, log_normalizer, target, 5
+        )
+        transformed = centered_layerwise_vmf_nll_sum(
+            [target * scale + shift],
+            [estimate * scale + shift],
+            kappa,
+            log_kappa,
+            log_normalizer,
+            target,
+            5,
+        )
+        torch.testing.assert_close(original, transformed, rtol=2e-6, atol=2e-6)
 
     def test_relu_orthogonal_changes_only_the_core_options(self):
         model = self.make_model(activation="relu", recurrent_init="orthogonal")
@@ -899,6 +1008,43 @@ class RNNAuxLMTest(unittest.TestCase):
                 )
             )
         )
+
+    def test_normalized_probe_only_has_exact_no_aux_forward_gradient(self):
+        baseline = self.make_model(normalized_state=True, chunk_offset=0)
+        probe = self.make_model(
+            normalized_state=True,
+            chunk_offset=0,
+            auxiliary_probe_only=True,
+            gaussian_scale_mode="learned",
+            state_likelihood_granularity="layer",
+        )
+        probe.load_state_dict(baseline.state_dict(), strict=False)
+        baseline_output, _ = baseline(self.inputs, compute_aux=False)
+        probe_output, _ = probe(
+            self.inputs, targets=self.targets, aux_tokens=self.targets
+        )
+        baseline_loss = F.cross_entropy(
+            baseline_output.logits.flatten(0, 1), self.targets.flatten()
+        )
+        probe_loss = F.cross_entropy(
+            probe_output.logits.flatten(0, 1), self.targets.flatten()
+        ) + 0.1 * probe_output.aux_loss
+
+        def forward_parameters(model):
+            return (
+                model.embedding.weight,
+                model.initial_state,
+                *tuple(model.rnn.parameters()),
+            )
+
+        baseline_gradients = torch.autograd.grad(
+            baseline_loss, forward_parameters(baseline)
+        )
+        probe_gradients = torch.autograd.grad(
+            probe_loss, forward_parameters(probe)
+        )
+        for actual, expected in zip(probe_gradients, baseline_gradients):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

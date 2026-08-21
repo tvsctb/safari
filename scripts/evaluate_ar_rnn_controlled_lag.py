@@ -53,9 +53,12 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
         activation=args.activation,
         recurrent_init=args.recurrent_init,
         recurrent_identity_scale=args.recurrent_identity_scale,
+        normalized_state=args.normalized_state,
+        normalization_epsilon=args.normalization_epsilon,
         rho=args.rho,
         tau=args.tau,
         gaussian_scale_mode=args.gaussian_scale_mode,
+        state_likelihood_granularity=args.state_likelihood_granularity,
         gaussian_scale_learning_start_step=(
             args.gaussian_scale_learning_start_step
         ),
@@ -78,6 +81,7 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
         ),
         state_aux_distribution=args.state_aux_distribution,
         vmf_kappa_mode=args.vmf_kappa_mode,
+        vmf_kappa_learning_rate=args.vmf_kappa_learning_rate,
         memory_vmf_kappa=args.memory_vmf_kappa,
         terminal_vmf_kappa=args.terminal_vmf_kappa,
         auxiliary_probe_only=args.probe_only,
@@ -175,14 +179,17 @@ def evaluate(model: RNNAuxLM, args: argparse.Namespace) -> dict:
 
 
 def learned_scale_state(model: RNNAuxLM) -> dict:
-    def scalar(value):
-        value = float(value.detach().cpu())
-        return value if math.isfinite(value) else None
+    def values(value):
+        value = value.detach().cpu().reshape(-1).tolist()
+        value = [float(item) if math.isfinite(float(item)) else None for item in value]
+        return value[0] if len(value) == 1 else value
 
     return {
-        "rho": scalar(model._configured_gaussian_scale("rho")),
-        "tau": scalar(model._configured_gaussian_scale("tau")),
-        "memory_scale_target_rms": scalar(
+        "rho": values(model._configured_gaussian_scale("rho")),
+        "tau": values(model._configured_gaussian_scale("tau")),
+        "memory_vmf_kappa": values(model._configured_vmf_kappa("memory")),
+        "terminal_vmf_kappa": values(model._configured_vmf_kappa("terminal")),
+        "memory_scale_target_rms": values(
             model._configured_memory_scale_target()
         ),
         "memory_scale_target_initialized": bool(
@@ -202,10 +209,13 @@ def log_wandb(report: dict, checkpoint: Path, args: argparse.Namespace) -> None:
         "activation": args.activation,
         "recurrent_init": args.recurrent_init,
         "recurrent_identity_scale": args.recurrent_identity_scale,
+        "normalized_state": args.normalized_state,
+        "normalization_epsilon": args.normalization_epsilon,
         "probe_only": args.probe_only,
         "rho": args.rho,
         "tau": args.tau,
         "gaussian_scale_mode": args.gaussian_scale_mode,
+        "state_likelihood_granularity": args.state_likelihood_granularity,
         "gaussian_scale_learning_start_step": (
             args.gaussian_scale_learning_start_step
         ),
@@ -220,6 +230,7 @@ def log_wandb(report: dict, checkpoint: Path, args: argparse.Namespace) -> None:
         "aux_chunk_sizes": args.aux_chunk_sizes,
         "state_aux_distribution": args.state_aux_distribution,
         "vmf_kappa_mode": args.vmf_kappa_mode,
+        "vmf_kappa_learning_rate": args.vmf_kappa_learning_rate,
         "memory_vmf_kappa": args.memory_vmf_kappa,
         "terminal_vmf_kappa": args.terminal_vmf_kappa,
         "condition_memory_reconstruction_on_boundary": (
@@ -270,11 +281,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation", choices=("tanh", "relu"), required=True)
     parser.add_argument("--recurrent-init", choices=("orthogonal", "identity"), required=True)
     parser.add_argument("--recurrent-identity-scale", type=float, default=1.0)
+    parser.add_argument("--normalized-state", action="store_true")
+    parser.add_argument("--normalization-epsilon", type=float, default=1e-5)
     parser.add_argument("--probe-only", action="store_true")
     parser.add_argument("--rho", type=float, default=16.0)
     parser.add_argument("--tau", type=float, required=True)
     parser.add_argument(
         "--gaussian-scale-mode", choices=("fixed", "learned"), default="fixed"
+    )
+    parser.add_argument(
+        "--state-likelihood-granularity",
+        choices=("global", "layer"),
+        default="global",
     )
     parser.add_argument("--gaussian-scale-learning-start-step", type=int, default=0)
     parser.add_argument("--gaussian-scale-learning-rate", type=float, default=1e-5)
@@ -298,6 +316,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vmf-kappa-mode", choices=("fixed", "learned"), default="fixed"
     )
+    parser.add_argument("--vmf-kappa-learning-rate", type=float, default=1e-4)
     parser.add_argument("--memory-vmf-kappa", type=float, default=1.0)
     parser.add_argument("--terminal-vmf-kappa", type=float, default=1.0)
     parser.add_argument(

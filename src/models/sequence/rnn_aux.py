@@ -10,6 +10,9 @@ import torch.nn.functional as F
 from src.models.sequence.auxiliary import (
     AuxCausalLMOutput,
     boundary_inverse_targets,
+    centered_layerwise_directional_diagnostics,
+    centered_layerwise_terminal_vmf_nll,
+    centered_layerwise_vmf_nll_sum,
     chunk_ranges,
     cross_entropy_sum,
     directional_reconstruction_diagnostics,
@@ -26,12 +29,78 @@ from src.models.sequence.auxiliary import (
 )
 
 
+class NormalizedStateRNNLayer(nn.Module):
+    """Elman layer whose recurrent state is the non-affine normalized preactivation.
+
+    The recurrent memory and the value exposed to the next layer are deliberately
+    distinct:
+
+        memory_t = LN_nonaffine(W_x input_t + W_m memory_{t-1})
+        output_t = tanh(gamma * memory_t + beta)
+
+    This keeps every post-initial recurrent state on the centered unit-RMS
+    sphere while retaining a bounded, affine-calibrated inter-layer output.  The
+    two matrices plus gamma/beta have exactly the same parameter count as one
+    native ``nn.RNN`` layer with its two bias vectors.
+    """
+
+    def __init__(self, d_model, epsilon=1e-5):
+        super().__init__()
+        self.d_model = int(d_model)
+        self.epsilon = float(epsilon)
+        self.weight_ih_l0 = nn.Parameter(torch.empty(d_model, d_model))
+        self.weight_hh_l0 = nn.Parameter(torch.empty(d_model, d_model))
+        self.gamma = nn.Parameter(torch.ones(d_model))
+        self.beta = nn.Parameter(torch.zeros(d_model))
+        self.gamma._no_weight_decay = True
+        self.beta._no_weight_decay = True
+
+    def reset_parameters(self, recurrent_init, recurrent_identity_scale):
+        nn.init.xavier_uniform_(self.weight_ih_l0)
+        if recurrent_init == "orthogonal":
+            nn.init.orthogonal_(self.weight_hh_l0)
+        else:
+            nn.init.eye_(self.weight_hh_l0)
+            with torch.no_grad():
+                self.weight_hh_l0.mul_(recurrent_identity_scale)
+        nn.init.ones_(self.gamma)
+        nn.init.zeros_(self.beta)
+
+    def forward(self, inputs, state, return_trajectory=False):
+        if state.shape != (1, inputs.size(0), self.d_model):
+            raise ValueError("normalized RNN layer state has an invalid shape")
+        memory = state[0]
+        outputs = []
+        memories = [] if return_trajectory else None
+        for token_input in inputs.unbind(dim=1):
+            preactivation = F.linear(token_input, self.weight_ih_l0)
+            preactivation = preactivation + F.linear(
+                memory, self.weight_hh_l0
+            )
+            memory = F.layer_norm(
+                preactivation,
+                (self.d_model,),
+                weight=None,
+                bias=None,
+                eps=self.epsilon,
+            )
+            outputs.append(torch.tanh(memory * self.gamma + self.beta))
+            if return_trajectory:
+                memories.append(memory)
+        return (
+            torch.stack(outputs, dim=1),
+            memory.unsqueeze(0),
+            torch.stack(memories, dim=1) if return_trajectory else None,
+        )
+
+
 class StackedRNN(nn.Module):
     """A configurable stacked vanilla RNN exposing every layer trajectory.
 
-    Each layer is evaluated over the complete sequence in one native RNN call.
-    This keeps the recurrent computation independent of auxiliary chunking while
-    avoiding a Python loop over tokens.
+    Native tanh/ReLU layers use fused ``nn.RNN`` calls.  The normalized-state
+    variant uses the explicit recurrence required to keep its memory separate
+    from its post-tanh output.  In either case AUX chunking is sampled only after
+    this complete forward trajectory has been computed.
     """
 
     def __init__(
@@ -42,6 +111,8 @@ class StackedRNN(nn.Module):
         activation="tanh",
         recurrent_init="orthogonal",
         recurrent_identity_scale=1.0,
+        normalized_state=False,
+        normalization_epsilon=1e-5,
     ):
         super().__init__()
         if activation not in {"tanh", "relu"}:
@@ -52,25 +123,40 @@ class StackedRNN(nn.Module):
             raise ValueError("identity recurrent initialization requires relu")
         if recurrent_identity_scale <= 0:
             raise ValueError("recurrent_identity_scale must be positive")
+        if normalized_state and activation != "tanh":
+            raise ValueError("normalized_state currently requires tanh activation")
+        if normalization_epsilon <= 0:
+            raise ValueError("normalization_epsilon must be positive")
         self.d_model = d_model
         self.n_layer = n_layer
         self.dropout = float(dropout)
         self.activation = activation
         self.recurrent_init = recurrent_init
         self.recurrent_identity_scale = float(recurrent_identity_scale)
+        self.normalized_state = bool(normalized_state)
+        self.normalization_epsilon = float(normalization_epsilon)
         self.layers = nn.ModuleList(
-            nn.RNN(
-                d_model,
-                d_model,
-                num_layers=1,
-                nonlinearity=activation,
-                batch_first=True,
+            (
+                NormalizedStateRNNLayer(d_model, normalization_epsilon)
+                if normalized_state
+                else nn.RNN(
+                    d_model,
+                    d_model,
+                    num_layers=1,
+                    nonlinearity=activation,
+                    batch_first=True,
+                )
             )
             for _ in range(n_layer)
         )
 
     def reset_parameters(self):
         for layer in self.layers:
+            if self.normalized_state:
+                layer.reset_parameters(
+                    self.recurrent_init, self.recurrent_identity_scale
+                )
+                continue
             nn.init.xavier_uniform_(layer.weight_ih_l0)
             if self.recurrent_init == "orthogonal":
                 nn.init.orthogonal_(layer.weight_hh_l0)
@@ -103,12 +189,18 @@ class StackedRNN(nn.Module):
             # remain identical, including accumulation into the shared
             # learned initial state.
             layer_state = state[index : index + 1].contiguous()
-            layer_output, terminal_state = layer(
-                layer_input, layer_state
-            )
+            if self.normalized_state:
+                layer_output, terminal_state, layer_trajectory = layer(
+                    layer_input, layer_state, return_trajectory=return_trajectory
+                )
+            else:
+                layer_output, terminal_state = layer(
+                    layer_input, layer_state
+                )
+                layer_trajectory = layer_output
             terminal_states.append(terminal_state)
             if return_trajectory:
-                trajectories.append(layer_output)
+                trajectories.append(layer_trajectory)
             layer_input = layer_output
 
         terminal_state = torch.cat(terminal_states, dim=0)
@@ -134,9 +226,12 @@ class RNNAuxLM(nn.Module):
         activation="tanh",
         recurrent_init="orthogonal",
         recurrent_identity_scale=1.0,
+        normalized_state=False,
+        normalization_epsilon=1e-5,
         rho=1.0,
         tau=1.0,
         gaussian_scale_mode="fixed",
+        state_likelihood_granularity="global",
         gaussian_scale_learning_start_step=0,
         gaussian_scale_learning_rate=1e-5,
         memory_scale_target=None,
@@ -147,6 +242,7 @@ class RNNAuxLM(nn.Module):
         memory_scale_constraint_ramp_steps=0,
         state_aux_distribution="gaussian",
         vmf_kappa_mode="fixed",
+        vmf_kappa_learning_rate=1e-4,
         memory_vmf_kappa=1.0,
         terminal_vmf_kappa=1.0,
         auxiliary_probe_only=False,
@@ -188,8 +284,14 @@ class RNNAuxLM(nn.Module):
             raise ValueError("aux_chunk_sizes must not contain duplicates")
         if not 0.0 <= float(dropout) < 1.0:
             raise ValueError("dropout must be in [0, 1)")
+        if not isinstance(normalized_state, bool):
+            raise ValueError("normalized_state must be a boolean")
         if rho <= 0 or tau <= 0:
             raise ValueError("rho and tau must be positive")
+        if state_likelihood_granularity not in {"global", "layer"}:
+            raise ValueError(
+                "state_likelihood_granularity must be global or layer"
+            )
         if gaussian_scale_mode not in {"fixed", "learned"}:
             raise ValueError("gaussian_scale_mode must be fixed or learned")
         if memory_scale_target_mode not in {"fixed", "learned"}:
@@ -260,10 +362,20 @@ class RNNAuxLM(nn.Module):
             raise ValueError(
                 "a positive memory_scale_constraint_weight requires memory_scale_target"
             )
+        if normalized_state and memory_scale_constraint_weight > 0:
+            raise ValueError(
+                "normalized_state fixes recurrent scale and cannot use a state-scale constraint"
+            )
         if state_aux_distribution not in {"gaussian", "vmf"}:
             raise ValueError("state_aux_distribution must be gaussian or vmf")
         if vmf_kappa_mode not in {"fixed", "learned"}:
             raise ValueError("vmf_kappa_mode must be fixed or learned")
+        if (
+            isinstance(vmf_kappa_learning_rate, bool)
+            or not math.isfinite(float(vmf_kappa_learning_rate))
+            or float(vmf_kappa_learning_rate) <= 0
+        ):
+            raise ValueError("vmf_kappa_learning_rate must be finite and positive")
         if memory_vmf_kappa <= 0 or terminal_vmf_kappa <= 0:
             raise ValueError("vMF kappas must be positive")
         if not isinstance(auxiliary_probe_only, bool):
@@ -296,6 +408,8 @@ class RNNAuxLM(nn.Module):
         self.state_aux_distribution = state_aux_distribution
         self.vmf_kappa_mode = vmf_kappa_mode
         self.gaussian_scale_mode = gaussian_scale_mode
+        self.state_likelihood_granularity = state_likelihood_granularity
+        self.normalized_state = bool(normalized_state)
         self.memory_scale_target_mode = memory_scale_target_mode
         self.gaussian_scale_learning_start_step = (
             gaussian_scale_learning_start_step
@@ -344,6 +458,8 @@ class RNNAuxLM(nn.Module):
             activation=activation,
             recurrent_init=recurrent_init,
             recurrent_identity_scale=recurrent_identity_scale,
+            normalized_state=normalized_state,
+            normalization_epsilon=normalization_epsilon,
         )
         self.inverse_rnn = copy.deepcopy(self.rnn)
         self.memory_predictor = nn.Sequential(
@@ -362,13 +478,19 @@ class RNNAuxLM(nn.Module):
                 "lr": float(gaussian_scale_learning_rate),
                 "weight_decay": 0.0,
             }
-            self.log_rho = nn.Parameter(torch.tensor(float(rho)).log())
-            self.log_tau = nn.Parameter(torch.tensor(float(tau)).log())
+            scale_shape = (n_layer,) if state_likelihood_granularity == "layer" else ()
+            self.log_rho = nn.Parameter(
+                torch.full(scale_shape, float(rho)).log()
+            )
+            self.log_tau = nn.Parameter(
+                torch.full(scale_shape, float(tau)).log()
+            )
             self.log_rho._optim = dict(scale_optim)
             self.log_tau._optim = dict(scale_optim)
         else:
-            self.register_buffer("rho", torch.tensor(float(rho)))
-            self.register_buffer("tau", torch.tensor(float(tau)))
+            scale_shape = (n_layer,) if state_likelihood_granularity == "layer" else ()
+            self.register_buffer("rho", torch.full(scale_shape, float(rho)))
+            self.register_buffer("tau", torch.full(scale_shape, float(tau)))
         self.register_buffer(
             "memory_scale_target",
             torch.tensor(
@@ -407,38 +529,52 @@ class RNNAuxLM(nn.Module):
         # The persistent tensor remains the checkpoint source of truth.
         self._aux_training_step_value = 0
         if vmf_kappa_mode == "learned":
+            kappa_shape = (
+                (n_layer,) if state_likelihood_granularity == "layer" else ()
+            )
             self.log_memory_vmf_kappa = nn.Parameter(
-                torch.tensor(float(memory_vmf_kappa)).log()
+                torch.full(kappa_shape, float(memory_vmf_kappa)).log()
             )
             self.log_terminal_vmf_kappa = nn.Parameter(
-                torch.tensor(float(terminal_vmf_kappa)).log()
+                torch.full(kappa_shape, float(terminal_vmf_kappa)).log()
             )
+            kappa_optim = {
+                "lr": float(vmf_kappa_learning_rate),
+                "weight_decay": 0.0,
+            }
+            self.log_memory_vmf_kappa._optim = dict(kappa_optim)
+            self.log_terminal_vmf_kappa._optim = dict(kappa_optim)
             self.log_memory_vmf_kappa._no_weight_decay = True
             self.log_terminal_vmf_kappa._no_weight_decay = True
         else:
+            kappa_shape = (
+                (n_layer,) if state_likelihood_granularity == "layer" else ()
+            )
             self.register_buffer(
                 "memory_vmf_kappa",
-                torch.tensor(float(memory_vmf_kappa)),
+                torch.full(kappa_shape, float(memory_vmf_kappa)),
                 persistent=False,
             )
             self.register_buffer(
                 "terminal_vmf_kappa",
-                torch.tensor(float(terminal_vmf_kappa)),
+                torch.full(kappa_shape, float(terminal_vmf_kappa)),
                 persistent=False,
             )
         if state_aux_distribution == "vmf":
-            log_kappa, log_normalizer = vmf_log_normalizer_grid(n_layer * d_model)
+            vmf_dimension = d_model - 1 if normalized_state else n_layer * d_model
+            log_kappa, log_normalizer = vmf_log_normalizer_grid(vmf_dimension)
             self.register_buffer(
                 "_vmf_log_kappa_grid", log_kappa, persistent=False
             )
             self.register_buffer(
                 "_vmf_log_normalizer_grid", log_normalizer, persistent=False
             )
-            self.terminal_target._no_weight_decay = True
+        self.terminal_target._no_weight_decay = True
         self.reset_parameters()
         self.metrics = {}
         self.loss_components = {}
         self.scale_loss_components = {}
+        self.layer_loss_components = {}
 
     def reset_parameters(self):
         nn.init.normal_(self.embedding.weight, std=0.02)
@@ -566,6 +702,10 @@ class RNNAuxLM(nn.Module):
         ):
             return value.detach()
         return value
+
+    @staticmethod
+    def _layer_parameter(value, layer):
+        return value if value.ndim == 0 else value[layer]
 
     def _configured_memory_scale_target(self, log_rms=None):
         if self.memory_scale_target_mode == "fixed":
@@ -867,6 +1007,16 @@ class RNNAuxLM(nn.Module):
                     batch_size,
                     scale_axis=1,
                 ) / sequence_normalizer
+            elif self.normalized_state:
+                loss_memory = centered_layerwise_vmf_nll_sum(
+                    memory_targets,
+                    memory_estimates,
+                    self._configured_vmf_kappa("memory"),
+                    self._vmf_log_kappa_grid,
+                    self._vmf_log_normalizer_grid,
+                    logits,
+                    batch_size,
+                ) / sequence_normalizer
             else:
                 loss_memory = vmf_nll_sum(
                     memory_targets,
@@ -892,6 +1042,15 @@ class RNNAuxLM(nn.Module):
                     scale_axis=0,
                     target=self.terminal_target,
                 ) / sequence_normalizer
+            elif self.normalized_state:
+                loss_terminal = centered_layerwise_terminal_vmf_nll(
+                    terminal_value,
+                    self.terminal_target,
+                    self._configured_vmf_kappa("terminal"),
+                    self._vmf_log_kappa_grid,
+                    self._vmf_log_normalizer_grid,
+                    batch_size,
+                ) / sequence_normalizer
             else:
                 loss_terminal = terminal_vmf_nll(
                     terminal_value,
@@ -901,6 +1060,73 @@ class RNNAuxLM(nn.Module):
                     self._vmf_log_normalizer_grid,
                     batch_size,
                 ) / sequence_normalizer
+        layer_components = {}
+        if self.normalized_state:
+            terminal_value = torch.stack(
+                [layer_states[:, -1] for layer_states in trajectory], dim=0
+            )
+            if self.auxiliary_probe_only:
+                terminal_value = terminal_value.detach()
+            for layer in range(self.n_layer):
+                layer_memory = logits.new_zeros(())
+                layer_terminal = logits.new_zeros(())
+                if self.use_memory_loss:
+                    layer_targets = [
+                        value[:, layer : layer + 1] for value in memory_targets
+                    ]
+                    layer_estimates = [
+                        value[:, layer : layer + 1] for value in memory_estimates
+                    ]
+                    if self.state_aux_distribution == "gaussian":
+                        layer_memory = gaussian_nll_sum(
+                            layer_targets,
+                            layer_estimates,
+                            self._layer_parameter(
+                                self._configured_gaussian_scale("rho"), layer
+                            ),
+                            logits,
+                            batch_size,
+                            scale_axis=1,
+                        ) / sequence_normalizer
+                    else:
+                        layer_memory = centered_layerwise_vmf_nll_sum(
+                            layer_targets,
+                            layer_estimates,
+                            self._layer_parameter(
+                                self._configured_vmf_kappa("memory"), layer
+                            ),
+                            self._vmf_log_kappa_grid,
+                            self._vmf_log_normalizer_grid,
+                            logits,
+                            batch_size,
+                        ) / sequence_normalizer
+                if self.use_terminal_loss:
+                    if self.state_aux_distribution == "gaussian":
+                        layer_terminal = terminal_gaussian_nll(
+                            terminal_value[layer : layer + 1],
+                            self._layer_parameter(
+                                self._configured_gaussian_scale("tau"), layer
+                            ),
+                            batch_size,
+                            scale_axis=0,
+                            target=self.terminal_target[layer : layer + 1],
+                        ) / sequence_normalizer
+                    else:
+                        layer_terminal = centered_layerwise_terminal_vmf_nll(
+                            terminal_value[layer : layer + 1],
+                            self.terminal_target[layer : layer + 1],
+                            self._layer_parameter(
+                                self._configured_vmf_kappa("terminal"), layer
+                            ),
+                            self._vmf_log_kappa_grid,
+                            self._vmf_log_normalizer_grid,
+                            batch_size,
+                        ) / sequence_normalizer
+                layer_components[layer] = {
+                    "memory_nll": layer_memory,
+                    "terminal_nll": layer_terminal,
+                    "total": layer_memory + layer_terminal,
+                }
         aux_loss = loss_chunk + loss_discrete + loss_memory + loss_terminal
         components = {
             "chunk_ce": loss_chunk,
@@ -909,26 +1135,36 @@ class RNNAuxLM(nn.Module):
             "terminal_nll": loss_terminal,
             "total": aux_loss,
         }
+        rho = self._configured_gaussian_scale("rho").detach()
+        tau = self._configured_gaussian_scale("tau").detach()
+        memory_kappa = self._configured_vmf_kappa("memory").detach()
+        terminal_kappa = self._configured_vmf_kappa("terminal").detach()
         metrics = {
             "aux/chunk_ce": loss_chunk.detach(),
             "aux/discrete_ce": loss_discrete.detach(),
             "aux/memory_nll": loss_memory.detach(),
             "aux/terminal_nll": loss_terminal.detach(),
             "aux/total": aux_loss.detach(),
-            "aux/rho": self._configured_gaussian_scale("rho").detach().reshape(()),
-            "aux/rho_mean": self._configured_gaussian_scale("rho").detach().reshape(()),
-            "aux/tau": self._configured_gaussian_scale("tau").detach().reshape(()),
-            "aux/tau_mean": self._configured_gaussian_scale("tau").detach().reshape(()),
+            "aux/rho": rho.float().mean(),
+            "aux/rho_mean": rho.float().mean(),
+            "aux/tau": tau.float().mean(),
+            "aux/tau_mean": tau.float().mean(),
             "aux/probe_only": logits.detach().new_tensor(
                 float(self.auxiliary_probe_only)
             ),
-            "aux/memory_vmf_kappa": self._configured_vmf_kappa(
-                "memory"
-            ).detach().reshape(()),
-            "aux/terminal_vmf_kappa": self._configured_vmf_kappa(
-                "terminal"
-            ).detach().reshape(()),
+            "aux/memory_vmf_kappa": memory_kappa.float().mean(),
+            "aux/terminal_vmf_kappa": terminal_kappa.float().mean(),
         }
+        if self.state_likelihood_granularity == "layer":
+            for layer in range(self.n_layer):
+                metrics.update(
+                    {
+                        f"aux/rho_layer_{layer}": rho[layer],
+                        f"aux/tau_layer_{layer}": tau[layer],
+                        f"aux/memory_vmf_kappa_layer_{layer}": memory_kappa[layer],
+                        f"aux/terminal_vmf_kappa_layer_{layer}": terminal_kappa[layer],
+                    }
+                )
         if compute_diagnostics:
             diagnostics = memory_reconstruction_diagnostics(
                 memory_targets, memory_estimates, logits
@@ -953,6 +1189,16 @@ class RNNAuxLM(nn.Module):
                     for name, value in directional.items()
                 }
             )
+            if self.normalized_state:
+                centered_directional = centered_layerwise_directional_diagnostics(
+                    memory_targets, memory_estimates, logits
+                )
+                metrics.update(
+                    {
+                        f"aux/memory_centered_{name}": value
+                        for name, value in centered_directional.items()
+                    }
+                )
             terminal_value = torch.stack(
                 [layer_states[:, -1] for layer_states in trajectory], dim=0
             )
@@ -984,7 +1230,14 @@ class RNNAuxLM(nn.Module):
                     },
                 }
             )
-        return aux_loss, components, metrics, memory_targets, memory_estimates
+        return (
+            aux_loss,
+            components,
+            metrics,
+            memory_targets,
+            memory_estimates,
+            layer_components,
+        )
 
     def forward(
         self,
@@ -1035,6 +1288,7 @@ class RNNAuxLM(nn.Module):
             self.metrics = {}
             self.loss_components = {}
             self.scale_loss_components = {}
+            self.layer_loss_components = {}
             return (
                 AuxCausalLMOutput(logits=logits, aux_loss=logits.new_zeros(())),
                 terminal_state,
@@ -1055,6 +1309,7 @@ class RNNAuxLM(nn.Module):
         )
         aggregate["state_scale"] = state_scale_loss
         self.scale_loss_components = {}
+        self.layer_loss_components = {}
         scale_metrics = {}
         all_memory_targets = []
         all_memory_estimates = []
@@ -1069,6 +1324,7 @@ class RNNAuxLM(nn.Module):
                 metrics,
                 memory_targets,
                 memory_estimates,
+                layer_components,
             ) = self._compute_auxiliary_loss(
                 input_ids,
                 token_stream,
@@ -1080,6 +1336,8 @@ class RNNAuxLM(nn.Module):
                 compute_diagnostics,
             )
             self.scale_loss_components[chunk_size] = components
+            for layer, values in layer_components.items():
+                self.layer_loss_components[(chunk_size, layer)] = values
             if first_scale_metrics is None:
                 first_scale_metrics = metrics
             for name in (
@@ -1096,21 +1354,21 @@ class RNNAuxLM(nn.Module):
             all_memory_estimates.extend(memory_estimates)
         aux_loss = sum(aggregate.values())
         self.loss_components = {**aggregate, "total": aux_loss}
+        rho = self._configured_gaussian_scale("rho").detach()
+        tau = self._configured_gaussian_scale("tau").detach()
+        memory_kappa = self._configured_vmf_kappa("memory").detach()
+        terminal_kappa = self._configured_vmf_kappa("terminal").detach()
         self.metrics = {
             **{
                 f"aux/{name}": value.detach()
                 for name, value in self.loss_components.items()
             },
-            "aux/rho": self._configured_gaussian_scale("rho").detach().reshape(()),
-            "aux/rho_mean": self._configured_gaussian_scale("rho").detach().reshape(()),
-            "aux/tau": self._configured_gaussian_scale("tau").detach().reshape(()),
-            "aux/tau_mean": self._configured_gaussian_scale("tau").detach().reshape(()),
-            "aux/memory_vmf_kappa": self._configured_vmf_kappa(
-                "memory"
-            ).detach().reshape(()),
-            "aux/terminal_vmf_kappa": self._configured_vmf_kappa(
-                "terminal"
-            ).detach().reshape(()),
+            "aux/rho": rho.float().mean(),
+            "aux/rho_mean": rho.float().mean(),
+            "aux/tau": tau.float().mean(),
+            "aux/tau_mean": tau.float().mean(),
+            "aux/memory_vmf_kappa": memory_kappa.float().mean(),
+            "aux/terminal_vmf_kappa": terminal_kappa.float().mean(),
             "aux/num_chunk_scales": logits.detach().new_tensor(
                 float(len(self.aux_chunk_sizes))
             ),
@@ -1120,6 +1378,32 @@ class RNNAuxLM(nn.Module):
             **state_scale_metrics,
             **scale_metrics,
         }
+        if self.state_likelihood_granularity == "layer":
+            for layer in range(self.n_layer):
+                self.metrics.update(
+                    {
+                        f"aux/rho_layer_{layer}": rho[layer],
+                        f"aux/tau_layer_{layer}": tau[layer],
+                        f"aux/memory_vmf_kappa_layer_{layer}": memory_kappa[layer],
+                        f"aux/terminal_vmf_kappa_layer_{layer}": terminal_kappa[layer],
+                    }
+                )
+        if self.normalized_state:
+            for layer, states in enumerate(trajectory):
+                detached = states.detach().float()
+                self.metrics.update(
+                    {
+                        f"aux/state_layer_{layer}_coordinate_mean_abs": (
+                            detached.mean(dim=-1).abs().mean()
+                        ),
+                        f"aux/state_layer_{layer}_coordinate_rms": (
+                            detached.square().mean().sqrt()
+                        ),
+                        f"aux/state_layer_{layer}_vector_norm": (
+                            detached.norm(dim=-1).mean()
+                        ),
+                    }
+                )
         if compute_diagnostics:
             pooled_memory_targets = (
                 [torch.cat(all_memory_targets, dim=0)]
@@ -1141,6 +1425,21 @@ class RNNAuxLM(nn.Module):
                     },
                 }
             )
+            if pooled_memory_targets:
+                target_value = pooled_memory_targets[0]
+                estimate_value = pooled_memory_estimates[0]
+                for layer in range(self.n_layer):
+                    layer_diagnostics = memory_reconstruction_diagnostics(
+                        [target_value[:, layer : layer + 1]],
+                        [estimate_value[:, layer : layer + 1]],
+                        logits,
+                    )
+                    self.metrics.update(
+                        {
+                            f"aux/memory_layer_{layer}_{name}": value
+                            for name, value in layer_diagnostics.items()
+                        }
+                    )
             directional = directional_reconstruction_diagnostics(
                 pooled_memory_targets, pooled_memory_estimates, logits
             )
@@ -1150,6 +1449,16 @@ class RNNAuxLM(nn.Module):
                     for name, value in directional.items()
                 }
             )
+            if self.normalized_state:
+                centered_directional = centered_layerwise_directional_diagnostics(
+                    pooled_memory_targets, pooled_memory_estimates, logits
+                )
+                self.metrics.update(
+                    {
+                        f"aux/memory_centered_{name}": value
+                        for name, value in centered_directional.items()
+                    }
+                )
             if first_scale_metrics is not None:
                 self.metrics.update(
                     {

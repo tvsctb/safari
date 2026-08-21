@@ -476,6 +476,105 @@ def terminal_vmf_nll(
     return (-kappa.float() * cosine - log_normalizer.float()).sum() / batch_size
 
 
+def _centered_layer_directions(value):
+    """Project layer states to the LayerNorm subspace and normalize directions."""
+    if value.ndim != 3 or value.size(-1) < 2:
+        raise ValueError(
+            "centered layer directions require (examples, layers, width>=2)"
+        )
+    centered = value.float() - value.float().mean(dim=-1, keepdim=True)
+    epsilon = torch.finfo(centered.dtype).eps
+    norms = centered.norm(dim=-1)
+    directions = centered / norms.clamp_min(epsilon).unsqueeze(-1)
+    return directions, norms
+
+
+def centered_layerwise_vmf_nll_sum(
+    targets,
+    estimates,
+    kappa,
+    log_kappa_grid,
+    log_normalizer_grid,
+    reference,
+    batch_size,
+):
+    """Proper product-vMF NLL on each centered LayerNorm state sphere.
+
+    A width-d non-affine LayerNorm state lies in the (d-1)-dimensional
+    centered subspace, hence on S^(d-2) after directional normalization.  A
+    scalar kappa is shared across layers; a vector supplies one concentration
+    per recurrent layer.
+    """
+    if not targets:
+        return reference.new_zeros(())
+    if len(targets) != len(estimates):
+        raise ValueError("targets and estimates must have the same length")
+    target = torch.cat(tuple(targets), dim=0)
+    estimate = torch.cat(tuple(estimates), dim=0)
+    if target.shape != estimate.shape:
+        raise ValueError("vMF target and estimate shapes must match")
+    target_direction, _ = _centered_layer_directions(target)
+    estimate_direction, _ = _centered_layer_directions(estimate)
+    cosine = (target_direction * estimate_direction).sum(dim=-1)
+    if kappa.ndim > 1 or (kappa.ndim == 1 and kappa.numel() != target.size(1)):
+        raise ValueError("kappa must be scalar or contain one value per layer")
+    log_normalizer = interpolate_vmf_log_normalizer(
+        kappa, log_kappa_grid, log_normalizer_grid
+    )
+    return (
+        -kappa.float() * cosine - log_normalizer.float()
+    ).sum() / batch_size
+
+
+def centered_layerwise_terminal_vmf_nll(
+    value,
+    target,
+    kappa,
+    log_kappa_grid,
+    log_normalizer_grid,
+    batch_size,
+):
+    """Product-vMF terminal NLL for (layers, batch, width) normalized states."""
+    if value.ndim != 3 or target.shape != (value.size(0), 1, value.size(2)):
+        raise ValueError("terminal vMF target has an invalid shape")
+    targets = [target.transpose(0, 1).expand(value.size(1), -1, -1)]
+    estimates = [value.transpose(0, 1)]
+    return centered_layerwise_vmf_nll_sum(
+        targets,
+        estimates,
+        kappa,
+        log_kappa_grid,
+        log_normalizer_grid,
+        value,
+        batch_size,
+    )
+
+
+def centered_layerwise_directional_diagnostics(targets, estimates, reference):
+    """Return pooled and per-layer angular diagnostics in the centered subspace."""
+    if not targets:
+        return {}
+    target = torch.cat(tuple(targets), dim=0).detach()
+    estimate = torch.cat(tuple(estimates), dim=0).detach()
+    target_direction, target_norm = _centered_layer_directions(target)
+    estimate_direction, estimate_norm = _centered_layer_directions(estimate)
+    cosine = (target_direction * estimate_direction).sum(dim=-1)
+    metrics = {
+        "cosine": cosine.mean().to(reference),
+        "target_norm": target_norm.mean().to(reference),
+        "estimate_norm": estimate_norm.mean().to(reference),
+    }
+    for layer in range(target.size(1)):
+        metrics.update(
+            {
+                f"layer_{layer}_cosine": cosine[:, layer].mean().to(reference),
+                f"layer_{layer}_target_norm": target_norm[:, layer].mean().to(reference),
+                f"layer_{layer}_estimate_norm": estimate_norm[:, layer].mean().to(reference),
+            }
+        )
+    return metrics
+
+
 def directional_reconstruction_diagnostics(targets, estimates, reference):
     """Detached whole-state angular and radial diagnostics."""
     if not targets:

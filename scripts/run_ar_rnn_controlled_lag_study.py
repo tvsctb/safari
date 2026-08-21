@@ -79,9 +79,11 @@ def evaluation_command(
         "--activation", trial.activation,
         "--recurrent-init", trial.recurrent_init,
         "--recurrent-identity-scale", str(trial.recurrent_identity_scale),
+        "--normalization-epsilon", str(trial.normalization_epsilon),
         "--rho", str(trial.rho),
         "--tau", str(trial.tau),
         "--gaussian-scale-mode", trial.gaussian_scale_mode,
+        "--state-likelihood-granularity", trial.state_likelihood_granularity,
         "--gaussian-scale-learning-start-step",
         str(trial.gaussian_scale_learning_start_step),
         "--gaussian-scale-learning-rate",
@@ -110,6 +112,7 @@ def evaluation_command(
         ),
         "--state-aux-distribution", trial.state_aux_distribution,
         "--vmf-kappa-mode", trial.vmf_kappa_mode,
+        "--vmf-kappa-learning-rate", str(trial.vmf_kappa_learning_rate),
         "--memory-vmf-kappa", str(trial.memory_vmf_kappa),
         "--terminal-vmf-kappa", str(trial.terminal_vmf_kappa),
         "--examples-per-lag", str(args.examples_per_lag),
@@ -126,6 +129,8 @@ def evaluation_command(
         )
     if trial.probe_only:
         command.append("--probe-only")
+    if trial.normalized_state:
+        command.append("--normalized-state")
     if trial.condition_memory_reconstruction_on_boundary:
         command.append("--condition-memory-reconstruction-on-boundary")
     return command
