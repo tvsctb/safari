@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from omegaconf import ListConfig
 
 from src.models.sequence.auxiliary import (
+    centered_layerwise_terminal_vmf_nll,
     centered_layerwise_vmf_nll_sum,
     vmf_log_normalizer_grid,
 )
@@ -143,8 +144,8 @@ class RNNAuxLMTest(unittest.TestCase):
             (vmf.log_memory_vmf_kappa, vmf.log_terminal_vmf_kappa),
         )
         self.assertEqual(tuple(vmf.log_memory_vmf_kappa.shape), (3,))
-        self.assertEqual(vmf._vmf_log_kappa_grid.dtype, torch.float32)
-        self.assertEqual(vmf._vmf_log_normalizer_grid.dtype, torch.float32)
+        self.assertEqual(vmf._vmf_log_kappa_grid.dtype, torch.float64)
+        self.assertEqual(vmf._vmf_log_normalizer_grid.dtype, torch.float64)
         self.assertTrue(all(torch.isfinite(value).all() for value in gradients))
         self.assertTrue(all(value.dtype == torch.float32 for value in gradients))
         centered_terminal = (
@@ -174,6 +175,24 @@ class RNNAuxLMTest(unittest.TestCase):
             5,
         )
         torch.testing.assert_close(original, transformed, rtol=2e-6, atol=2e-6)
+
+    def test_centered_terminal_vmf_preserves_target_gradient_layout(self):
+        layers, batch, width = 3, 5, 8
+        value = torch.randn(layers, batch, width, requires_grad=True)
+        target = nn.Parameter(torch.randn(layers, 1, width))
+        kappa = torch.ones(layers, requires_grad=True)
+        log_kappa, log_normalizer = vmf_log_normalizer_grid(width - 1, points=64)
+        loss = centered_layerwise_terminal_vmf_nll(
+            value,
+            target,
+            kappa,
+            log_kappa,
+            log_normalizer,
+            batch,
+        )
+        loss.backward()
+        self.assertEqual(target.grad.stride(), target.stride())
+        self.assertTrue(torch.isfinite(target.grad).all())
 
     def test_relu_orthogonal_changes_only_the_core_options(self):
         model = self.make_model(activation="relu", recurrent_init="orthogonal")

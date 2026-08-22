@@ -395,8 +395,8 @@ def vmf_log_normalizer_grid(dimension, minimum=1e-4, maximum=1e4, points=4096):
     if not np.all(np.isfinite(log_normalizer)):
         raise RuntimeError("failed to construct a finite vMF normalizer grid")
     return (
-        torch.from_numpy(log_kappa.astype(np.float32)),
-        torch.from_numpy(log_normalizer.astype(np.float32)),
+        torch.from_numpy(log_kappa.astype(np.float64)),
+        torch.from_numpy(log_normalizer.astype(np.float64)),
     )
 
 
@@ -404,12 +404,7 @@ def interpolate_vmf_log_normalizer(kappa, log_kappa_grid, log_normalizer_grid):
     """Linearly interpolate log C_d(kappa) in log-kappa coordinates."""
     if log_kappa_grid.ndim != 1 or log_normalizer_grid.shape != log_kappa_grid.shape:
         raise ValueError("vMF normalizer grids must be equal-length vectors")
-    interpolation_dtype = kappa.dtype
-    if interpolation_dtype not in {torch.float32, torch.float64}:
-        interpolation_dtype = torch.float32
-    log_kappa_grid = log_kappa_grid.to(dtype=interpolation_dtype)
-    log_normalizer_grid = log_normalizer_grid.to(dtype=interpolation_dtype)
-    log_kappa = kappa.to(dtype=interpolation_dtype).log().clamp(
+    log_kappa = kappa.double().log().clamp(
         min=log_kappa_grid[0], max=log_kappa_grid[-1]
     )
     upper = torch.searchsorted(log_kappa_grid, log_kappa).clamp(
@@ -542,17 +537,19 @@ def centered_layerwise_terminal_vmf_nll(
     """Product-vMF terminal NLL for (layers, batch, width) normalized states."""
     if value.ndim != 3 or target.shape != (value.size(0), 1, value.size(2)):
         raise ValueError("terminal vMF target has an invalid shape")
-    targets = [target.transpose(0, 1).expand(value.size(1), -1, -1)]
-    estimates = [value.transpose(0, 1)]
-    return centered_layerwise_vmf_nll_sum(
-        targets,
-        estimates,
-        kappa,
-        log_kappa_grid,
-        log_normalizer_grid,
-        value,
-        batch_size,
+    # Keep the learned target in its native (layers, 1, width) layout.  The
+    # former transpose-then-expand route produced a non-native leaf-gradient
+    # stride, which CUDA fused AdamW correctly rejects.  Broadcasting one
+    # target direction over the batch is mathematically identical.
+    target_direction, _ = _centered_layer_directions(target[:, 0].unsqueeze(0))
+    estimate_direction, _ = _centered_layer_directions(value.transpose(0, 1))
+    cosine = (target_direction * estimate_direction).sum(dim=-1)
+    if kappa.ndim > 1 or (kappa.ndim == 1 and kappa.numel() != value.size(0)):
+        raise ValueError("kappa must be scalar or contain one value per layer")
+    log_normalizer = interpolate_vmf_log_normalizer(
+        kappa, log_kappa_grid, log_normalizer_grid
     )
+    return (-kappa.float() * cosine - log_normalizer.float()).sum() / batch_size
 
 
 def centered_layerwise_directional_diagnostics(targets, estimates, reference):
