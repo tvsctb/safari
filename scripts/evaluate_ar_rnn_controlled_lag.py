@@ -84,6 +84,7 @@ def model_from_checkpoint(path: Path, args: argparse.Namespace) -> RNNAuxLM:
         vmf_kappa_learning_rate=args.vmf_kappa_learning_rate,
         memory_vmf_kappa=args.memory_vmf_kappa,
         terminal_vmf_kappa=args.terminal_vmf_kappa,
+        inverse_capacity_multiplier=args.inverse_capacity_multiplier,
         auxiliary_probe_only=args.probe_only,
         stop_gradient_memory_target=False,
         stop_gradient_memory_observation=False,
@@ -319,6 +320,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vmf-kappa-learning-rate", type=float, default=1e-4)
     parser.add_argument("--memory-vmf-kappa", type=float, default=1.0)
     parser.add_argument("--terminal-vmf-kappa", type=float, default=1.0)
+    parser.add_argument(
+        "--inverse-capacity-multiplier", type=float, default=1.0
+    )
     parser.add_argument(
         "--condition-memory-reconstruction-on-boundary", action="store_true"
     )

@@ -65,6 +65,7 @@ class RNNTrial:
     vmf_kappa_learning_rate: float = 1e-4
     memory_vmf_kappa: float = 1.0
     terminal_vmf_kappa: float = 1.0
+    inverse_capacity_multiplier: float = 1.0
     gaussian_scale_mode: str = "fixed"
     state_likelihood_granularity: str = "global"
     gaussian_scale_learning_start_step: int = 0
@@ -214,6 +215,8 @@ def build_rnn_command(
         f"model.vmf_kappa_learning_rate={trial.vmf_kappa_learning_rate}",
         f"model.memory_vmf_kappa={trial.memory_vmf_kappa}",
         f"model.terminal_vmf_kappa={trial.terminal_vmf_kappa}",
+        "model.inverse_capacity_multiplier="
+        f"{trial.inverse_capacity_multiplier}",
         f"model.auxiliary_probe_only={str(trial.probe_only).lower()}",
         "model.stop_gradient_memory_target="
         f"{str(trial.stop_gradient_memory_target).lower()}",

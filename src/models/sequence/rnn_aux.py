@@ -211,6 +211,124 @@ class StackedRNN(nn.Module):
         return layer_input, terminal_state, tuple(trajectories)
 
 
+class FactorizedRNNLayer(nn.Module):
+    """Low-rank Elman layer with the same hidden-state interface as ``nn.RNN``."""
+
+    def __init__(self, d_model, rank, activation):
+        super().__init__()
+        self.d_model = int(d_model)
+        self.rank = int(rank)
+        self.activation = activation
+        self.weight_ih_left = nn.Parameter(torch.empty(d_model, rank))
+        self.weight_ih_right = nn.Parameter(torch.empty(rank, d_model))
+        self.weight_hh_left = nn.Parameter(torch.empty(d_model, rank))
+        self.weight_hh_right = nn.Parameter(torch.empty(rank, d_model))
+        self.bias_ih = nn.Parameter(torch.empty(d_model))
+        self.bias_hh = nn.Parameter(torch.empty(d_model))
+
+    @staticmethod
+    def _truncated_svd(weight, rank):
+        u, singular, vh = torch.linalg.svd(weight.float(), full_matrices=False)
+        root = singular[:rank].sqrt()
+        left = u[:, :rank] * root.unsqueeze(0)
+        right = root.unsqueeze(1) * vh[:rank]
+        return left.to(weight), right.to(weight)
+
+    @torch.no_grad()
+    def initialize_from(self, dense):
+        ih_left, ih_right = self._truncated_svd(
+            dense.weight_ih_l0, self.rank
+        )
+        hh_left, hh_right = self._truncated_svd(
+            dense.weight_hh_l0, self.rank
+        )
+        self.weight_ih_left.copy_(ih_left)
+        self.weight_ih_right.copy_(ih_right)
+        self.weight_hh_left.copy_(hh_left)
+        self.weight_hh_right.copy_(hh_right)
+        self.bias_ih.copy_(dense.bias_ih_l0)
+        self.bias_hh.copy_(dense.bias_hh_l0)
+
+    def forward(self, inputs, state, return_trajectory=False):
+        if state.shape != (1, inputs.size(0), self.d_model):
+            raise ValueError("factorized RNN layer state has an invalid shape")
+        hidden = state[0]
+        outputs = []
+        for token_input in inputs.unbind(dim=1):
+            input_term = F.linear(
+                F.linear(token_input, self.weight_ih_right),
+                self.weight_ih_left,
+                self.bias_ih,
+            )
+            recurrent_term = F.linear(
+                F.linear(hidden, self.weight_hh_right),
+                self.weight_hh_left,
+                self.bias_hh,
+            )
+            preactivation = input_term + recurrent_term
+            hidden = (
+                torch.relu(preactivation)
+                if self.activation == "relu"
+                else torch.tanh(preactivation)
+            )
+            outputs.append(hidden)
+        outputs = torch.stack(outputs, dim=1)
+        return outputs, hidden.unsqueeze(0), outputs if return_trajectory else None
+
+
+class FactorizedStackedRNN(nn.Module):
+    """Stacked inverse RNN whose effective hidden dimension remains unchanged."""
+
+    def __init__(self, d_model, n_layer, rank, dropout, activation):
+        super().__init__()
+        self.d_model = int(d_model)
+        self.n_layer = int(n_layer)
+        self.rank = int(rank)
+        self.dropout = float(dropout)
+        self.activation = activation
+        self.layers = nn.ModuleList(
+            FactorizedRNNLayer(d_model, rank, activation)
+            for _ in range(n_layer)
+        )
+
+    @torch.no_grad()
+    def initialize_from(self, dense):
+        if len(dense.layers) != len(self.layers):
+            raise ValueError("dense and factorized inverse depths must match")
+        for target, source in zip(self.layers, dense.layers):
+            if not isinstance(source, nn.RNN):
+                raise TypeError("factorized inverse requires native dense RNN layers")
+            target.initialize_from(source)
+
+    def forward(self, inputs, state, return_trajectory=False):
+        expected_state = (self.n_layer, inputs.size(0), self.d_model)
+        if tuple(state.shape) != expected_state:
+            raise ValueError(f"RNN state must have shape {expected_state}")
+        layer_input = inputs
+        terminal_states = []
+        trajectories = [] if return_trajectory else None
+        for index, layer in enumerate(self.layers):
+            if index > 0 and self.dropout > 0.0:
+                layer_input = F.dropout(
+                    layer_input, p=self.dropout, training=self.training
+                )
+            layer_output, terminal_state, layer_trajectory = layer(
+                layer_input,
+                state[index : index + 1],
+                return_trajectory=return_trajectory,
+            )
+            terminal_states.append(terminal_state)
+            if return_trajectory:
+                trajectories.append(layer_trajectory)
+            layer_input = layer_output
+        terminal_state = torch.cat(terminal_states, dim=0)
+        return (
+            layer_input,
+            terminal_state,
+            tuple(trajectories) if return_trajectory else None,
+        )
+
+
 class RNNAuxLM(nn.Module):
     """Vanilla RNN with configurable core initialization and inverse AUX."""
 
@@ -245,6 +363,7 @@ class RNNAuxLM(nn.Module):
         vmf_kappa_learning_rate=1e-4,
         memory_vmf_kappa=1.0,
         terminal_vmf_kappa=1.0,
+        inverse_capacity_multiplier=1.0,
         auxiliary_probe_only=False,
         stop_gradient_memory_target=False,
         stop_gradient_memory_observation=False,
@@ -288,6 +407,27 @@ class RNNAuxLM(nn.Module):
             raise ValueError("normalized_state must be a boolean")
         if rho <= 0 or tau <= 0:
             raise ValueError("rho and tau must be positive")
+        capacity_specs = {
+            0.125: (4, 13),
+            0.25: (8, 30),
+            0.5: (16, 62),
+            1.0: (None, 128),
+            2.0: (64, 259),
+        }
+        inverse_capacity_multiplier = float(inverse_capacity_multiplier)
+        if inverse_capacity_multiplier not in capacity_specs:
+            raise ValueError(
+                "inverse_capacity_multiplier must be one of "
+                "0.125, 0.25, 0.5, 1.0, or 2.0"
+            )
+        if inverse_capacity_multiplier != 1.0 and d_model != 64:
+            raise ValueError(
+                "non-default inverse capacity is calibrated for d_model=64"
+            )
+        if normalized_state and inverse_capacity_multiplier != 1.0:
+            raise ValueError(
+                "factorized inverse capacity currently requires a native RNN core"
+            )
         if state_likelihood_granularity not in {"global", "layer"}:
             raise ValueError(
                 "state_likelihood_granularity must be global or layer"
@@ -448,6 +588,12 @@ class RNNAuxLM(nn.Module):
         self.condition_memory_reconstruction_on_boundary = (
             condition_memory_reconstruction_on_boundary
         )
+        self.inverse_capacity_multiplier = inverse_capacity_multiplier
+        inverse_rank, predictor_width = capacity_specs[
+            inverse_capacity_multiplier
+        ]
+        self.inverse_rank = inverse_rank
+        self.inverse_predictor_width = predictor_width
 
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.initial_state = nn.Parameter(torch.empty(n_layer, 1, d_model))
@@ -461,12 +607,34 @@ class RNNAuxLM(nn.Module):
             normalized_state=normalized_state,
             normalization_epsilon=normalization_epsilon,
         )
-        self.inverse_rnn = copy.deepcopy(self.rnn)
-        self.memory_predictor = nn.Sequential(
+        self.inverse_rnn = (
+            copy.deepcopy(self.rnn)
+            if inverse_rank is None
+            else FactorizedStackedRNN(
+                d_model,
+                n_layer,
+                inverse_rank,
+                dropout,
+                activation,
+            )
+        )
+        baseline_memory_predictor = nn.Sequential(
             nn.Linear(d_model, 2 * d_model),
             nn.GELU(),
             nn.Linear(2 * d_model, d_model),
         )
+        if predictor_width == 2 * d_model:
+            self.memory_predictor = baseline_memory_predictor
+        else:
+            # Match the constructor-time RNG consumption of the historical 1x
+            # model exactly. The capacity-specific predictor is created in a
+            # fork because its constructor initialization is discarded below.
+            with torch.random.fork_rng(devices=[]):
+                self.memory_predictor = nn.Sequential(
+                    nn.Linear(d_model, predictor_width),
+                    nn.GELU(),
+                    nn.Linear(predictor_width, d_model),
+                )
         # The terminal prior mean is always learned.  Keeping it allocated when
         # the terminal term is disabled makes parameterization identical across
         # terminal-loss ablations and detached no-AUX probes.
@@ -588,7 +756,10 @@ class RNNAuxLM(nn.Module):
         else:
             nn.init.zeros_(self.terminal_target)
         self.rnn.reset_parameters()
-        self.inverse_rnn.load_state_dict(self.rnn.state_dict())
+        if self.inverse_rank is None:
+            self.inverse_rnn.load_state_dict(self.rnn.state_dict())
+        else:
+            self.inverse_rnn.initialize_from(self.rnn)
 
         first = self.memory_predictor[0]
         second = self.memory_predictor[2]
@@ -675,6 +846,13 @@ class RNNAuxLM(nn.Module):
 
     def _predict_memory(self, hidden):
         return hidden + self.memory_predictor(hidden)
+
+    def inverse_parameter_count(self):
+        return sum(
+            parameter.numel()
+            for module in (self.inverse_rnn, self.memory_predictor)
+            for parameter in module.parameters()
+        )
 
     def default_state(self, *batch_shape, device=None):
         if len(batch_shape) != 1:
@@ -808,6 +986,12 @@ class RNNAuxLM(nn.Module):
                 else reference.detach().new_zeros(())
             ),
             "aux/training_step": self.aux_training_step.detach().to(reference),
+            "aux/inverse_parameter_count": reference.new_tensor(
+                float(self.inverse_parameter_count())
+            ),
+            "aux/inverse_capacity_multiplier": reference.new_tensor(
+                self.inverse_capacity_multiplier
+            ),
         }
         return loss, metrics
 

@@ -115,6 +115,8 @@ def evaluation_command(
         "--vmf-kappa-learning-rate", str(trial.vmf_kappa_learning_rate),
         "--memory-vmf-kappa", str(trial.memory_vmf_kappa),
         "--terminal-vmf-kappa", str(trial.terminal_vmf_kappa),
+        "--inverse-capacity-multiplier",
+        str(trial.inverse_capacity_multiplier),
         "--examples-per-lag", str(args.examples_per_lag),
         "--base-batch-size", str(args.base_batch_size),
         "--dataset-seed", str(args.dataset_seed),

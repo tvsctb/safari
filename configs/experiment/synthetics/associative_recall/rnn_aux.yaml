@@ -37,6 +37,7 @@ model:
   vmf_kappa_learning_rate: 1e-4
   memory_vmf_kappa: 1.0
   terminal_vmf_kappa: 1.0
+  inverse_capacity_multiplier: 1.0
   auxiliary_probe_only: false
   stop_gradient_memory_target: false
   stop_gradient_memory_observation: false

@@ -69,7 +69,9 @@ class InverseMatchedPastProbe(nn.Module):
         super().__init__()
         with torch.random.fork_rng():
             torch.manual_seed(initialization_seed)
-            self.inverse_rnn = copy.deepcopy(forward.inverse_rnn)
+            # Always use the same dense 1x topology, independent of the
+            # capacity of the inverse decoder used to train the forward state.
+            self.inverse_rnn = copy.deepcopy(forward.rnn)
             self.inverse_rnn.reset_parameters()
             self.inverse_rnn.requires_grad_(True)
         # Match the inverse's shared embedding/head without allowing probe
