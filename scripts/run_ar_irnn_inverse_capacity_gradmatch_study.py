@@ -43,8 +43,8 @@ REFERENCE_TUNING_EVAL_GROUP = (
     "ar-irnn-inverse-capacity-tuning-eval-20260824-v1"
 )
 REFERENCE_HELDOUT_EVAL_GROUP = "ar-irnn-difficulty-heldout-eval-20260820-v1"
-REFERENCE_DENSE_CONDITION = "memory4x"
-REFERENCE_NOAUX_CONDITION = "noaux"
+REFERENCE_DENSE_CONDITION = "k5-memory4x-aux"
+REFERENCE_NOAUX_CONDITION = "k5-noaux-noaux"
 
 
 def make_trial(
