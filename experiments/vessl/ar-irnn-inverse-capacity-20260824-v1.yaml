@@ -1,0 +1,54 @@
+name: ar-irnn-inverse-capacity-20260824-v1
+description: Fully automated K5 iRNN inverse-decoder capacity 1/8x through 2x screen, common fixed-M40 probes, and held-out validation
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-2
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach 919a3e4
+      test "$(git rev-parse HEAD)" = "919a3e462ed7bcf625294bf5f3c490344e3ea2ed"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_rnn_inverse_capacity \
+        tests.test_ar_irnn_inverse_capacity_study \
+        tests.test_rnn_aux \
+        tests.test_ar_rnn_study \
+        tests.test_ar_rnn_controlled_lag_study \
+        tests.test_ar_rnn_past_info_probe \
+        tests.test_ar_irnn_aux_pressure_factorial_study \
+        tests.test_ar_irnn_difficulty_ladder_study
+      PYTHONPATH=.:scripts python scripts/run_ar_irnn_inverse_capacity_study.py \
+        --output-root /output/ar-irnn-inverse-capacity-20260824-v1 \
+        --gpu-ids 0,1 \
+        --workers-per-gpu 4 \
+        --probe-workers-per-gpu 4 \
+        --wandb-project aux-assc-recall \
+        --wandb-entity bjjin07-x \
+        --tuning-training-group ar-irnn-inverse-capacity-tuning-train-20260824-v1 \
+        --tuning-eval-group ar-irnn-inverse-capacity-tuning-eval-20260824-v1 \
+        --tuning-probe-group ar-irnn-inverse-capacity-tuning-probe-20260824-v1 \
+        --heldout-training-group ar-irnn-inverse-capacity-heldout-train-20260824-v1 \
+        --heldout-eval-group ar-irnn-inverse-capacity-heldout-eval-20260824-v1 \
+        --heldout-probe-group ar-irnn-inverse-capacity-heldout-probe-20260824-v1 \
+        --examples-per-lag 10000 \
+        --base-batch-size 128 \
+        --dataset-seed 20260820 \
+        --probe-dataset-seed 20260824 \
+        --probe-train-base-examples 10000 \
+        --probe-val-base-examples 2000 \
+        --probe-test-base-examples 5000 \
+        --probe-forward-batch-size 512 \
+        --probe-batch-size 4096 \
+        --probe-max-epochs 120 \
+        --probe-min-epochs 30 \
+        --probe-patience 20
+      test -f /output/ar-irnn-inverse-capacity-20260824-v1/IRNN_INVERSE_CAPACITY_COMPLETE
+    workdir: /workspace
