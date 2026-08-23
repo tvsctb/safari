@@ -269,11 +269,17 @@ def ensure_fresh_groups(args: argparse.Namespace) -> None:
             raise RuntimeError(f"W&B group is not empty: {group}")
 
 
-def run_preflight(root: Path, gpu_id: int, args: argparse.Namespace) -> None:
+def run_preflight(
+    root: Path,
+    gpu_id: int,
+    args: argparse.Namespace,
+    trial: RNNTrial | None = None,
+) -> None:
     marker = root / "preflight" / "PREFLIGHT_OK"
     if marker.exists():
         return
-    trial = make_trial("one-eighth", 0.125, 20260824, "preflight")
+    if trial is None:
+        trial = make_trial("one-eighth", 0.125, 20260824, "preflight")
     trial = RNNTrial(**{**asdict(trial), "max_epochs": 1})
     command = build_rnn_command(trial, root / "preflight", "unused", "unused", "unused")
     replacements = {
