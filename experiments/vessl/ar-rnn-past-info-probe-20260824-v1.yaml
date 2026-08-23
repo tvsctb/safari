@@ -1,0 +1,40 @@
+name: ar-rnn-past-info-probe-20260824-v1
+description: Frozen K5 iRNN inverse-matched key-only probes of past value information in full versus globally unit-normalized boundary states
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-2
+image: ghcr.io/tvsctb/safari-aux:torch2.3.1-v3
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - command: |-
+      set -euo pipefail
+      git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
+      cd /workspace/safari
+      git checkout --detach 483468a
+      test "$(git rev-parse HEAD)" = "483468a9473258f1dc6883a360aa240af5b5af88"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
+      test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
+      PYTHONPATH=.:scripts python -m unittest \
+        tests.test_ar_rnn_past_info_probe \
+        tests.test_rnn_aux \
+        tests.test_controlled_assoc_recall
+      PYTHONPATH=.:scripts python scripts/run_ar_rnn_past_info_probe_study.py \
+        --output-root /output/ar-rnn-past-info-probe-20260824-v1 \
+        --gpu-ids 0,1 \
+        --workers-per-gpu 4 \
+        --wandb-project aux-assc-recall \
+        --wandb-entity bjjin07-x \
+        --wandb-group ar-rnn-past-info-probe-20260824-v1 \
+        --dataset-seed 20260824 \
+        --train-base-examples 2000 \
+        --val-base-examples 500 \
+        --test-base-examples 1000 \
+        --forward-batch-size 512 \
+        --batch-size 4096 \
+        --max-epochs 120 \
+        --min-epochs 30 \
+        --patience 20
+      test -f /output/ar-rnn-past-info-probe-20260824-v1/PAST_INFO_PROBE_COMPLETE
+    workdir: /workspace
