@@ -59,7 +59,7 @@ class PastInformationProbeTest(unittest.TestCase):
         ratios_after = normalized[:, 0].norm(dim=1) / normalized[:, 1].norm(dim=1)
         torch.testing.assert_close(ratios_before, ratios_after)
 
-    def test_extraction_uses_body_boundaries_and_past_targets(self):
+    def test_extraction_uses_fixed_final_boundary_and_past_targets(self):
         model = self.model().eval()
         dataset = MODULE.extract_examples(
             model,
@@ -73,9 +73,10 @@ class PastInformationProbeTest(unittest.TestCase):
         self.assertEqual(set(ages.tolist()), set(range(0, 40, 2)))
         self.assertTrue(torch.all((keys >= 0) & (keys < 20)))
         self.assertTrue(torch.all((targets >= 0) & (targets < 20)))
-        # Twenty placements yield 5+5+... alternating eligible boundaries:
-        # 10 + 10 + 9 + 9 + ... + 1 + 1 = 110 examples per base item.
-        self.assertEqual(len(dataset), 220)
+        # Every placement is read exactly once from the same final body state.
+        self.assertEqual(len(dataset), 40)
+        age_counts = torch.bincount(ages // 2, minlength=20)
+        torch.testing.assert_close(age_counts, torch.full((20,), 2))
 
 
 if __name__ == "__main__":

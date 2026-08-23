@@ -31,7 +31,6 @@ SPEC.loader.exec_module(MODULE)
 generate_controlled_lag_batch = MODULE.generate_controlled_lag_batch
 
 BODY_TOKENS = 40
-BOUNDARIES = tuple(range(4, BODY_TOKENS + 1, 4))
 AGES = tuple(range(0, BODY_TOKENS, 2))
 
 
@@ -130,19 +129,17 @@ def extract_examples(
         _, _, trajectory = model.rnn(
             model.embedding(token_ids), initial, return_trajectory=True
         )
-        batch_value_ends = value_ends[start:end]
-        for boundary in BOUNDARIES:
-            mask = batch_value_ends <= boundary
-            if not mask.any():
-                continue
-            device_mask = mask.to(device)
-            states = torch.stack(
-                [layer[device_mask, boundary - 1] for layer in trajectory], dim=1
-            )
-            state_parts.append(states.float().cpu())
-            key_parts.append(keys[start:end][mask].clone())
-            target_parts.append(targets[start:end][mask].clone())
-            age_parts.append((boundary - batch_value_ends[mask]).clone())
+        # Hold the observation time fixed. Every queried association is decoded
+        # from the state after the complete 40-token body, so ``age`` varies
+        # only through the counterfactual insertion position and cannot be
+        # confounded with how long the recurrent state has been allowed to form.
+        states = torch.stack(
+            [layer[:, BODY_TOKENS - 1] for layer in trajectory], dim=1
+        )
+        state_parts.append(states.float().cpu())
+        key_parts.append(keys[start:end].clone())
+        target_parts.append(targets[start:end].clone())
+        age_parts.append((BODY_TOKENS - value_ends[start:end]).clone())
     dataset = TensorDataset(
         torch.cat(state_parts),
         torch.cat(key_parts),
@@ -286,7 +283,7 @@ def train(args: argparse.Namespace) -> dict:
                 "forward_seed": args.forward_seed,
                 "probe_seed": args.probe_seed,
                 "state_mode": args.state_mode,
-                "probe_architecture": "exact_inverse_rnn_key_to_past_value",
+                "probe_architecture": "exact_inverse_rnn_M40_key_to_past_value",
                 "forward_frozen": True,
                 "num_active_associations": 5,
                 "chance_accuracy": 1 / 9,
@@ -392,9 +389,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-mode", choices=("full", "global_unit"), required=True)
     parser.add_argument("--forward-seed", type=int, required=True)
     parser.add_argument("--probe-seed", type=int, required=True)
-    parser.add_argument("--train-base-examples", type=int, default=2000)
-    parser.add_argument("--val-base-examples", type=int, default=500)
-    parser.add_argument("--test-base-examples", type=int, default=1000)
+    parser.add_argument("--train-base-examples", type=int, default=10000)
+    parser.add_argument("--val-base-examples", type=int, default=2000)
+    parser.add_argument("--test-base-examples", type=int, default=5000)
     parser.add_argument("--dataset-seed", type=int, default=20260824)
     parser.add_argument("--forward-batch-size", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=4096)

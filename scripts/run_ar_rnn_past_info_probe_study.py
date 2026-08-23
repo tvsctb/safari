@@ -250,7 +250,7 @@ def aggregate(trials: list[ProbeTrial], args: argparse.Namespace) -> dict:
     return {
         "protocol": {
             "source_group": SOURCE_EVAL_GROUP,
-            "probe": "exact inverse RNN initialized from M_i; key-only input; past-value target",
+            "probe": "exact inverse RNN initialized from fixed M40; key-only input; past-value target",
             "forward_frozen": True,
             "target_leakage": False,
             "chance_accuracy": 1 / 9,
@@ -270,9 +270,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb-entity", default="bjjin07-x")
     parser.add_argument("--wandb-group", required=True)
     parser.add_argument("--dataset-seed", type=int, default=20260824)
-    parser.add_argument("--train-base-examples", type=int, default=2000)
-    parser.add_argument("--val-base-examples", type=int, default=500)
-    parser.add_argument("--test-base-examples", type=int, default=1000)
+    parser.add_argument("--train-base-examples", type=int, default=10000)
+    parser.add_argument("--val-base-examples", type=int, default=2000)
+    parser.add_argument("--test-base-examples", type=int, default=5000)
     parser.add_argument("--forward-batch-size", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--max-epochs", type=int, default=120)
