@@ -12,8 +12,8 @@ run:
       set -euo pipefail
       git clone --branch aux-experiments --single-branch https://github.com/tvsctb/safari.git /workspace/safari
       cd /workspace/safari
-      git checkout --detach 0b2c50c
-      test "$(git rev-parse HEAD)" = "0b2c50ca184e0c0682fcb8c2a3ba277b5b7e241b"
+      git checkout --detach 4353f56
+      test "$(git rev-parse HEAD)" = "4353f564346f263a26390b882e8006dcaf2f2483"
       test "$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')" = "2"
       test "$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c 'RTX 3090')" = "2"
       PYTHONPATH=.:scripts python -m unittest \
